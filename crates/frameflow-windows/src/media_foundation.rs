@@ -19,22 +19,34 @@ use windows::{
         },
         Media::MediaFoundation::{
             IMF2DBuffer, IMFAttributes, IMFByteStream, IMFDXGIDeviceManager, IMFSinkWriter,
-            MFCreateAttributes, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer,
-            MFCreateMediaType, MFCreateSample, MFCreateSinkWriterFromURL, MFMediaType_Video,
-            MFShutdown, MFStartup, MFTranscodeContainerType_MPEG4, MFVideoFormat_H264,
-            MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFSTARTUP_FULL, MF_MT_AVG_BITRATE,
-            MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
-            MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
-            MF_SINK_WRITER_D3D_MANAGER, MF_TRANSCODE_CONTAINERTYPE, MF_VERSION,
+            MFAudioFormat_AAC, MFAudioFormat_PCM, MFCreateAttributes, MFCreateDXGIDeviceManager,
+            MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
+            MFCreateSinkWriterFromURL, MFMediaType_Audio, MFMediaType_Video, MFShutdown, MFStartup,
+            MFTranscodeContainerType_MPEG4, MFVideoFormat_H264, MFVideoFormat_NV12,
+            MFVideoInterlace_Progressive, MFSTARTUP_FULL, MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION,
+            MF_MT_AAC_PAYLOAD_TYPE, MF_MT_ALL_SAMPLES_INDEPENDENT,
+            MF_MT_AUDIO_AVG_BYTES_PER_SECOND, MF_MT_AUDIO_BITS_PER_SAMPLE,
+            MF_MT_AUDIO_BLOCK_ALIGNMENT, MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND,
+            MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
+            MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE,
+            MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MF_SINK_WRITER_D3D_MANAGER,
+            MF_TRANSCODE_CONTAINERTYPE, MF_VERSION,
         },
     },
 };
 
-use crate::PlatformError;
+use crate::{MixedAudioBlock, PlatformError, NORMALIZED_AUDIO_SAMPLE_RATE};
+
+const AAC_BIT_RATE: u32 = 128_000;
+const AAC_CHANNELS: u32 = 2;
+const PCM_BITS_PER_SAMPLE: u32 = 16;
+const PCM_BLOCK_ALIGNMENT: u32 = AAC_CHANNELS * (PCM_BITS_PER_SAMPLE / 8);
+const AAC_LC_PROFILE_LEVEL_2: u32 = 0x29;
 
 pub(crate) struct Mp4Writer {
     sink: IMFSinkWriter,
-    stream: u32,
+    video_stream: u32,
+    audio_stream: Option<u32>,
     _device_manager: IMFDXGIDeviceManager,
     converter: GpuBgraToNv12,
     timeline: SampleTimeline,
@@ -75,7 +87,23 @@ impl Mp4Writer {
         frame_rate: u32,
     ) -> Result<Self, PlatformError> {
         unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL)? };
-        let result = Self::create(path, device, context, width, height, frame_rate);
+        let result = Self::create(path, device, context, width, height, frame_rate, false);
+        if result.is_err() {
+            let _ = unsafe { MFShutdown() };
+        }
+        result
+    }
+
+    pub(crate) fn new_with_audio(
+        path: &Path,
+        device: &ID3D11Device,
+        context: &ID3D11DeviceContext,
+        width: u32,
+        height: u32,
+        frame_rate: u32,
+    ) -> Result<Self, PlatformError> {
+        unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL)? };
+        let result = Self::create(path, device, context, width, height, frame_rate, true);
         if result.is_err() {
             let _ = unsafe { MFShutdown() };
         }
@@ -89,6 +117,7 @@ impl Mp4Writer {
         width: u32,
         height: u32,
         frame_rate: u32,
+        include_audio: bool,
     ) -> Result<Self, PlatformError> {
         let mut manager = None;
         let mut reset_token = 0;
@@ -115,18 +144,26 @@ impl Mp4Writer {
                 target_bitrate(width, height, frame_rate),
             )?
         };
-        let stream = unsafe { sink.AddStream(&output)? };
+        let video_stream = unsafe { sink.AddStream(&output)? };
 
         let input = unsafe { MFCreateMediaType()? };
         set_video_type(&input, MFVideoFormat_NV12, width, height, frame_rate)?;
         unsafe {
-            sink.SetInputMediaType(stream, &input, None::<&IMFAttributes>)?;
+            sink.SetInputMediaType(video_stream, &input, None::<&IMFAttributes>)?;
+        }
+        let audio_stream = if include_audio {
+            Some(add_audio_stream(&sink)?)
+        } else {
+            None
+        };
+        unsafe {
             sink.BeginWriting()?;
         }
 
         Ok(Self {
             sink,
-            stream,
+            video_stream,
+            audio_stream,
             _device_manager: manager,
             converter: GpuBgraToNv12::new(device, context, width, height, frame_rate)?,
             timeline: SampleTimeline::new(frame_rate),
@@ -152,8 +189,64 @@ impl Mp4Writer {
             sample.SetSampleTime(timestamp)?;
             sample.SetSampleDuration(duration)?;
             self.sink
-                .WriteSample(self.stream, &sample)
+                .WriteSample(self.video_stream, &sample)
                 .map_err(|error| media_error("write NV12 sample", error))?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn write_audio_block(
+        &mut self,
+        block: &MixedAudioBlock,
+    ) -> Result<(), PlatformError> {
+        let stream = self.audio_stream.ok_or_else(|| {
+            PlatformError::MediaFoundation("MP4 writer has no audio stream".to_owned())
+        })?;
+        if block.valid_frames == 0
+            || block.valid_frames > block.samples.len() / AAC_CHANNELS as usize
+        {
+            return Err(PlatformError::MediaFoundation(
+                "mixed audio block has an invalid frame count".to_owned(),
+            ));
+        }
+
+        let byte_length = block
+            .valid_frames
+            .checked_mul(PCM_BLOCK_ALIGNMENT as usize)
+            .and_then(|length| u32::try_from(length).ok())
+            .ok_or_else(|| {
+                PlatformError::MediaFoundation("PCM audio block is too large".to_owned())
+            })?;
+        let buffer = unsafe { MFCreateMemoryBuffer(byte_length)? };
+        let mut destination = std::ptr::null_mut();
+        unsafe { buffer.Lock(&mut destination, None, None)? };
+        let destination =
+            unsafe { std::slice::from_raw_parts_mut(destination, byte_length as usize) };
+        let (destination, remainder) = destination.as_chunks_mut::<2>();
+        debug_assert!(remainder.is_empty());
+        for (sample, bytes) in block.samples[..block.valid_frames * AAC_CHANNELS as usize]
+            .iter()
+            .zip(destination)
+        {
+            let pcm = float_to_pcm16(*sample).to_le_bytes();
+            bytes.copy_from_slice(&pcm);
+        }
+        unsafe {
+            buffer.Unlock()?;
+            buffer.SetCurrentLength(byte_length)?;
+        }
+
+        let sample = unsafe { MFCreateSample()? };
+        let timestamp = audio_time_for_frame(block.start_frame);
+        let duration =
+            audio_time_for_frame(block.start_frame + block.valid_frames as u64) - timestamp;
+        unsafe {
+            sample.AddBuffer(&buffer)?;
+            sample.SetSampleTime(timestamp)?;
+            sample.SetSampleDuration(duration)?;
+            self.sink
+                .WriteSample(stream, &sample)
+                .map_err(|error| media_error("write PCM audio sample", error))?;
         }
         Ok(())
     }
@@ -330,6 +423,65 @@ fn set_video_type(
     Ok(())
 }
 
+fn add_audio_stream(sink: &IMFSinkWriter) -> Result<u32, PlatformError> {
+    let output = unsafe { MFCreateMediaType()? };
+    set_audio_type(&output, MFAudioFormat_AAC, 16, 1, AAC_BIT_RATE / 8)?;
+    unsafe {
+        output.SetUINT32(&MF_MT_AAC_PAYLOAD_TYPE, 0)?;
+        output.SetUINT32(
+            &MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION,
+            AAC_LC_PROFILE_LEVEL_2,
+        )?;
+        output.SetUINT32(&MF_MT_AVG_BITRATE, AAC_BIT_RATE)?;
+    }
+    let stream = unsafe { sink.AddStream(&output)? };
+
+    let input = unsafe { MFCreateMediaType()? };
+    set_audio_type(
+        &input,
+        MFAudioFormat_PCM,
+        PCM_BITS_PER_SAMPLE,
+        PCM_BLOCK_ALIGNMENT,
+        NORMALIZED_AUDIO_SAMPLE_RATE * PCM_BLOCK_ALIGNMENT,
+    )?;
+    unsafe {
+        input.SetUINT32(&MF_MT_ALL_SAMPLES_INDEPENDENT, 1)?;
+        sink.SetInputMediaType(stream, &input, None::<&IMFAttributes>)?;
+    }
+    Ok(stream)
+}
+
+fn set_audio_type(
+    media_type: &windows::Win32::Media::MediaFoundation::IMFMediaType,
+    subtype: windows::core::GUID,
+    bits_per_sample: u32,
+    block_alignment: u32,
+    average_bytes_per_second: u32,
+) -> Result<(), PlatformError> {
+    unsafe {
+        media_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
+        media_type.SetGUID(&MF_MT_SUBTYPE, &subtype)?;
+        media_type.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, AAC_CHANNELS)?;
+        media_type.SetUINT32(
+            &MF_MT_AUDIO_SAMPLES_PER_SECOND,
+            NORMALIZED_AUDIO_SAMPLE_RATE,
+        )?;
+        media_type.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, bits_per_sample)?;
+        media_type.SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, block_alignment)?;
+        media_type.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, average_bytes_per_second)?;
+    }
+    Ok(())
+}
+
+fn audio_time_for_frame(frame: u64) -> i64 {
+    ((u128::from(frame) * 10_000_000) / u128::from(NORMALIZED_AUDIO_SAMPLE_RATE)) as i64
+}
+
+fn float_to_pcm16(sample: f32) -> i16 {
+    let sample = if sample.is_finite() { sample } else { 0.0 };
+    (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16
+}
+
 fn pack_pair(high: u32, low: u32) -> u64 {
     (u64::from(high) << 32) | u64::from(low)
 }
@@ -373,5 +525,20 @@ mod tests {
             let timeline = SampleTimeline::new(frame_rate);
             assert_eq!(timeline.time_for_frame(u64::from(frame_rate)), 10_000_000);
         }
+    }
+
+    #[test]
+    fn audio_timeline_lands_exactly_on_one_second() {
+        assert_eq!(audio_time_for_frame(0), 0);
+        assert_eq!(audio_time_for_frame(1_024), 213_333);
+        assert_eq!(audio_time_for_frame(48_000), 10_000_000);
+    }
+
+    #[test]
+    fn pcm_conversion_clamps_and_sanitizes_samples() {
+        assert_eq!(float_to_pcm16(0.0), 0);
+        assert_eq!(float_to_pcm16(1.5), i16::MAX);
+        assert_eq!(float_to_pcm16(-1.5), -i16::MAX);
+        assert_eq!(float_to_pcm16(f32::NAN), 0);
     }
 }

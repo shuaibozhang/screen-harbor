@@ -24,8 +24,8 @@ export interface RecentRecording {
 export interface AppSnapshot {
   recordingState: RecordingState;
   saveDirectory: string;
-  microphone: { enabled: boolean; deviceName: string; available: boolean };
-  systemAudio: { enabled: boolean; available: boolean };
+  microphone: { enabled: boolean; deviceName?: string; available: boolean };
+  systemAudio: { enabled: boolean; deviceName?: string; available: boolean };
   outputSummary: string;
   captureFps: number;
   supportedCaptureFps: number[];

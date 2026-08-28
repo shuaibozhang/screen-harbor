@@ -10,7 +10,7 @@
 html { overflow-x: hidden; }
 body { margin: 0; min-width: 640px; min-height: 460px; overflow-x: hidden; background: #e9edf3; }
 button { font: inherit; color: inherit; }
-button:disabled { cursor: wait; opacity: .6; }
+button:disabled { cursor: not-allowed; opacity: .6; }
 
 .shell {
   width: 100%;
@@ -58,10 +58,10 @@ button.row:hover { border-color: #ccd4e4; background: #fbfcfe; }
 .row-copy small { display: flex; align-items: center; overflow: hidden; color: #7a8494; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .status-dot { width: 6px; height: 6px; margin-right: 6px; background: #a6adba; border-radius: 50%; }
 .status-dot.ready { background: #45a273; box-shadow: 0 0 0 3px #e6f5ed; }
-.switch { position: relative; width: 36px; height: 21px; padding: 2px; border: 0; border-radius: 999px; background: #cbd1db; cursor: pointer; }
-.switch[data-state="checked"] { background: #4169e1; }
-.switch-thumb { display: block; width: 17px; height: 17px; background: white; border-radius: 50%; box-shadow: 0 1px 3px rgba(30,40,55,.25); transition: transform .15s ease; }
-.switch[data-state="checked"] .switch-thumb { transform: translateX(15px); }
+.input-toggle { position: relative; flex: none; width: 36px; height: 20px; padding: 0; border: 0; border-radius: 999px; background: #c8ced8; transition: background .16s ease; }
+.input-toggle span { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px #0003; transition: transform .16s ease; }
+.input-toggle.enabled { background: #3375f6; }
+.input-toggle.enabled span { transform: translateX(16px); }
 .output .row { border-radius: 13px; }
 .empty { min-height: 70px; display: flex; gap: 12px; align-items: center; justify-content: center; color: #98a0ad; border: 1px dashed #d9dee7; border-radius: 13px; }
 .empty span { display: flex; flex-direction: column; gap: 3px; }
@@ -92,6 +92,8 @@ button.row:hover { border-color: #ccd4e4; background: #fbfcfe; }
   .shell { background: #20252d; box-shadow: none; }
   .titlebar { border-color: #303741; }
   .icon-button:hover, .row-icon { background: #303741; color: #cbd3df; }
+  .input-toggle { background: #4b5563; }
+  .input-toggle.enabled { background: #5b8cff; }
   .hero p, .start-area small, .section-heading h2, .row-copy small { color: #9ca6b5; }
   .rows, .row { border-color: #343b46; background: #282e37; }
   .rows .row + .row { border-color: #363e49; }

@@ -1,4 +1,3 @@
-import * as Switch from "@radix-ui/react-switch";
 import { listen } from "@tauri-apps/api/event";
 import {
   ChevronDown,
@@ -16,24 +15,17 @@ import { useAppStore } from "./store";
 import type { FinalizationEvent, RecordingState } from "./domain";
 import "./styles.css";
 
-function Toggle({ checked, label, disabled = false }: { checked: boolean; label: string; disabled?: boolean }) {
-  return (
-    <Switch.Root className="switch" defaultChecked={checked} disabled={disabled} aria-label={label}>
-      <Switch.Thumb className="switch-thumb" />
-    </Switch.Root>
-  );
-}
-
 function StatusDot({ available }: { available: boolean }) {
   return <span className={available ? "status-dot ready" : "status-dot"} aria-hidden="true" />;
 }
 
 export function App() {
-  const { snapshot, loading, error, hydrate, startSelection, updateCaptureFps } = useAppStore();
+  const { snapshot, loading, error, hydrate, startSelection, updateCaptureFps, updateAudioInput } = useAppStore();
   const [finalizationError, setFinalizationError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [draftFps, setDraftFps] = useState(30);
   const [savingSettings, setSavingSettings] = useState(false);
+  const [savingAudio, setSavingAudio] = useState<"microphone" | "systemAudio" | null>(null);
 
   useEffect(() => {
     void hydrate();
@@ -90,6 +82,15 @@ export function App() {
   const exceedsMonitorRefresh = snapshot.monitorRefreshRateHz !== undefined
     && draftFps > snapshot.monitorRefreshRateHz + 1;
 
+  const toggleAudio = async (source: "microphone" | "systemAudio", enabled: boolean) => {
+    setSavingAudio(source);
+    try {
+      await updateAudioInput(source, enabled);
+    } finally {
+      setSavingAudio(null);
+    }
+  };
+
   return (
     <main className="shell">
       <header className="titlebar">
@@ -133,13 +134,13 @@ export function App() {
           <div className="rows">
             <div className="row">
               <span className="row-icon"><Mic2 size={19} /></span>
-              <span className="row-copy"><strong>麦克风</strong><small><StatusDot available={snapshot.microphone.available} />{snapshot.microphone.deviceName}</small></span>
-              <Toggle checked={snapshot.microphone.enabled} disabled={!snapshot.microphone.available} label="开启麦克风" />
+              <span className="row-copy"><strong>麦克风</strong><small><StatusDot available={snapshot.microphone.available} />{snapshot.microphone.deviceName ?? "未找到可用麦克风"}</small></span>
+              <button className={`input-toggle ${snapshot.microphone.enabled ? "enabled" : ""}`} type="button" role="switch" aria-checked={snapshot.microphone.enabled} aria-label="录制麦克风" disabled={!snapshot.microphone.available || savingAudio !== null} onClick={() => void toggleAudio("microphone", !snapshot.microphone.enabled)}><span /></button>
             </div>
             <div className="row">
               <span className="row-icon"><MonitorSpeaker size={19} /></span>
-              <span className="row-copy"><strong>系统声音</strong><small><StatusDot available={snapshot.systemAudio.available} />录制设备播放的声音</small></span>
-              <Toggle checked={snapshot.systemAudio.enabled} disabled={!snapshot.systemAudio.available} label="开启系统声音" />
+              <span className="row-copy"><strong>系统声音</strong><small><StatusDot available={snapshot.systemAudio.available} />{snapshot.systemAudio.deviceName ?? "未找到可用输出设备"}</small></span>
+              <button className={`input-toggle ${snapshot.systemAudio.enabled ? "enabled" : ""}`} type="button" role="switch" aria-checked={snapshot.systemAudio.enabled} aria-label="录制系统声音" disabled={!snapshot.systemAudio.available || savingAudio !== null} onClick={() => void toggleAudio("systemAudio", !snapshot.systemAudio.enabled)}><span /></button>
             </div>
           </div>
         </section>

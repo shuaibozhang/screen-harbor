@@ -1,15 +1,30 @@
 #![cfg(target_os = "windows")]
 
+mod audio_bus;
+mod audio_devices;
+mod audio_mixer;
+mod com;
 mod displays;
 mod media_foundation;
 mod selection_overlay;
+mod wasapi_loopback;
 mod wgc;
 
+pub use audio_bus::{AudioNormalizer, NormalizedAudioChunk, NORMALIZED_AUDIO_SAMPLE_RATE};
+pub use audio_mixer::{
+    AudioMixer, AudioMixerConfig, AudioSourceControl, AudioSourceId, MixedAudioBlock,
+    AAC_AUDIO_BLOCK_FRAMES,
+};
 pub use displays::{enable_per_monitor_v2_dpi, list_displays};
 pub use selection_overlay::{start_native_selection, NativeSelectionSession};
+pub use wasapi_loopback::{
+    start_microphone_capture, start_system_audio_loopback, start_wasapi_capture,
+    AudioCaptureSource, AudioPacket, AudioSampleFormat, AudioStreamFormat, WasapiCaptureSession,
+    WasapiLoopbackSession,
+};
 pub use wgc::{
     capture_primary_frame, capture_region_frame, start_region_capture, start_region_mp4_capture,
-    CapturedFrameInfo, Mp4CaptureOptions, WgcCaptureSession,
+    CapturedFrameInfo, Mp4CaptureOptions, WgcAudioInput, WgcCaptureSession,
 };
 
 use thiserror::Error;
@@ -19,6 +34,7 @@ use windows::{
     Win32::{
         Foundation::HWND,
         Graphics::Dwm::DwmFlush,
+        System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency},
         UI::WindowsAndMessaging::{SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE},
     },
 };
@@ -50,6 +66,16 @@ pub enum PlatformError {
     WorkerControlTimeout(&'static str),
     #[error("Media Foundation pipeline failed: {0}")]
     MediaFoundation(String),
+    #[error("WASAPI capture failed: {0}")]
+    AudioCapture(String),
+    #[error("microphone access is denied by Windows privacy settings")]
+    AudioPermissionDenied,
+    #[error("audio device is unavailable: {0}")]
+    AudioDeviceUnavailable(String),
+    #[error("audio is not enabled for this recording")]
+    AudioNotEnabled,
+    #[error("audio encoder queue is full")]
+    AudioQueueFull,
     #[error("unsupported output frame rate: {0} FPS")]
     InvalidFrameRate(u32),
 }
@@ -57,6 +83,24 @@ pub enum PlatformError {
 pub fn flush_desktop_compositor() -> Result<(), PlatformError> {
     unsafe { DwmFlush()? };
     Ok(())
+}
+
+pub fn performance_time_100ns() -> Result<u64, PlatformError> {
+    let mut counter = 0_i64;
+    let mut frequency = 0_i64;
+    unsafe {
+        QueryPerformanceCounter(&mut counter)?;
+        QueryPerformanceFrequency(&mut frequency)?;
+    }
+    if counter < 0 || frequency <= 0 {
+        return Err(PlatformError::AudioCapture(
+            "performance counter returned an invalid value".to_owned(),
+        ));
+    }
+    Ok((counter as u128)
+        .saturating_mul(10_000_000)
+        .saturating_div(frequency as u128)
+        .min(u128::from(u64::MAX)) as u64)
 }
 
 pub fn graphics_capture_supported() -> Result<bool, PlatformError> {
@@ -70,3 +114,4 @@ pub fn exclude_window_from_capture(hwnd: isize) -> Result<(), PlatformError> {
     unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)? };
     Ok(())
 }
+pub use audio_devices::{default_audio_endpoints, AudioEndpointInfo, DefaultAudioEndpoints};

@@ -42,7 +42,7 @@ use frameflow_capture::{CaptureSession, PhysicalRect, RegionSelection};
 
 use crate::{
     displays::monitor_for_display_id, graphics_capture_supported, media_foundation::Mp4Writer,
-    PlatformError,
+    MixedAudioBlock, PlatformError,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,12 +56,53 @@ pub struct CapturedFrameInfo {
 
 pub struct WgcCaptureSession {
     control: mpsc::Sender<WorkerControl>,
+    audio: Option<WgcAudioInput>,
     worker: Option<JoinHandle<Result<(), PlatformError>>>,
+}
+
+#[derive(Clone)]
+pub struct WgcAudioInput {
+    sender: mpsc::SyncSender<MixedAudioBlock>,
+}
+
+impl WgcAudioInput {
+    pub fn submit(&self, block: MixedAudioBlock) -> Result<(), PlatformError> {
+        self.sender.try_send(block).map_err(|error| match error {
+            mpsc::TrySendError::Full(_) => PlatformError::AudioQueueFull,
+            mpsc::TrySendError::Disconnected(_) => {
+                PlatformError::WorkerUnavailable("audio encoder queue is disconnected".to_owned())
+            }
+        })
+    }
+
+    pub fn submit_wait(
+        &self,
+        mut block: MixedAudioBlock,
+        timeout: Duration,
+    ) -> Result<(), PlatformError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match self.sender.try_send(block) {
+                Ok(()) => return Ok(()),
+                Err(mpsc::TrySendError::Full(returned)) if Instant::now() < deadline => {
+                    block = returned;
+                    thread::sleep(Duration::from_millis(2));
+                }
+                Err(mpsc::TrySendError::Full(_)) => return Err(PlatformError::AudioQueueFull),
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    return Err(PlatformError::WorkerUnavailable(
+                        "audio encoder queue is disconnected".to_owned(),
+                    ));
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Mp4CaptureOptions {
     frames_per_second: u32,
+    audio_enabled: bool,
 }
 
 impl Mp4CaptureOptions {
@@ -69,11 +110,23 @@ impl Mp4CaptureOptions {
         if !(1..=240).contains(&frames_per_second) {
             return Err(PlatformError::InvalidFrameRate(frames_per_second));
         }
-        Ok(Self { frames_per_second })
+        Ok(Self {
+            frames_per_second,
+            audio_enabled: false,
+        })
     }
 
     pub fn frames_per_second(self) -> u32 {
         self.frames_per_second
+    }
+
+    pub fn with_audio(mut self, enabled: bool) -> Self {
+        self.audio_enabled = enabled;
+        self
+    }
+
+    pub fn audio_enabled(self) -> bool {
+        self.audio_enabled
     }
 }
 
@@ -81,6 +134,7 @@ impl Default for Mp4CaptureOptions {
     fn default() -> Self {
         Self {
             frames_per_second: 30,
+            audio_enabled: false,
         }
     }
 }
@@ -91,6 +145,18 @@ struct Mp4Output {
 }
 
 impl WgcCaptureSession {
+    /// Non-blocking delivery keeps WASAPI callback threads isolated from video
+    /// conversion and disk I/O. A full queue is explicit so the coordinator can
+    /// report degraded audio instead of stalling capture.
+    pub fn submit_audio_block(&self, block: MixedAudioBlock) -> Result<(), PlatformError> {
+        let audio = self.audio.as_ref().ok_or(PlatformError::AudioNotEnabled)?;
+        audio.submit(block)
+    }
+
+    pub fn audio_input(&self) -> Option<WgcAudioInput> {
+        self.audio.clone()
+    }
+
     fn control(&self, action: WorkerAction) -> Result<(), PlatformError> {
         let (acknowledge, receiver) = mpsc::sync_channel(1);
         self.control
@@ -286,6 +352,15 @@ where
     let selection = selection.clone();
     let (control_sender, control_receiver) = mpsc::channel();
     let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
+    let (audio_sender, audio_receiver) = if output
+        .as_ref()
+        .is_some_and(|output| output.options.audio_enabled())
+    {
+        let (sender, receiver) = mpsc::sync_channel(8);
+        (Some(WgcAudioInput { sender }), Some(receiver))
+    } else {
+        (None, None)
+    };
     let worker = thread::Builder::new()
         .name("frameflow-wgc".to_owned())
         .spawn(move || {
@@ -294,6 +369,7 @@ where
                 output,
                 callback,
                 control_receiver,
+                audio_receiver,
                 startup_sender,
             )
         })
@@ -302,6 +378,7 @@ where
     match startup_receiver.recv_timeout(Duration::from_secs(10)) {
         Ok(Ok(())) => Ok(WgcCaptureSession {
             control: control_sender,
+            audio: audio_sender,
             worker: Some(worker),
         }),
         Ok(Err(message)) => {
@@ -323,6 +400,7 @@ fn run_capture_worker<F>(
     output: Option<Mp4Output>,
     mut callback: F,
     control: mpsc::Receiver<WorkerControl>,
+    audio: Option<mpsc::Receiver<MixedAudioBlock>>,
     startup: mpsc::SyncSender<Result<(), String>>,
 ) -> Result<(), PlatformError>
 where
@@ -363,14 +441,25 @@ where
         let writer = output
             .as_ref()
             .map(|output| {
-                Mp4Writer::new(
-                    &output.path,
-                    &device.d3d11,
-                    &device.context,
-                    selection.capture_rect.width,
-                    selection.capture_rect.height,
-                    output.options.frames_per_second(),
-                )
+                if output.options.audio_enabled() {
+                    Mp4Writer::new_with_audio(
+                        &output.path,
+                        &device.d3d11,
+                        &device.context,
+                        selection.capture_rect.width,
+                        selection.capture_rect.height,
+                        output.options.frames_per_second(),
+                    )
+                } else {
+                    Mp4Writer::new(
+                        &output.path,
+                        &device.d3d11,
+                        &device.context,
+                        selection.capture_rect.width,
+                        selection.capture_rect.height,
+                        output.options.frames_per_second(),
+                    )
+                }
             })
             .transpose()?;
         Ok((device, frame_pool, session, size, writer))
@@ -427,6 +516,15 @@ where
         }
         if stopping {
             break;
+        }
+
+        if let (Some(writer), Some(audio)) = (writer.as_mut(), audio.as_ref()) {
+            if let Err(error) = drain_audio_blocks(writer, audio) {
+                let message = error.to_string();
+                callback(Err(PlatformError::MediaFoundation(message.clone())));
+                fatal_media_error = Some(message);
+                break;
+            }
         }
 
         let wait = if writer.is_some() && !paused && latest_frame.is_some() {
@@ -508,8 +606,21 @@ where
     if let Some(message) = fatal_media_error {
         return Err(PlatformError::MediaFoundation(message));
     }
+    if let (Some(writer), Some(audio)) = (writer.as_mut(), audio.as_ref()) {
+        drain_audio_blocks(writer, audio)?;
+    }
     if let Some(writer) = writer {
         writer.finalize()?;
+    }
+    Ok(())
+}
+
+fn drain_audio_blocks(
+    writer: &mut Mp4Writer,
+    receiver: &mpsc::Receiver<MixedAudioBlock>,
+) -> Result<(), PlatformError> {
+    while let Ok(block) = receiver.try_recv() {
+        writer.write_audio_block(&block)?;
     }
     Ok(())
 }
@@ -826,10 +937,10 @@ mod tests {
     #[test]
     fn mp4_options_validate_the_public_frame_rate_boundary() {
         for fps in [24, 30, 60] {
-            assert_eq!(
-                Mp4CaptureOptions::new(fps).unwrap().frames_per_second(),
-                fps
-            );
+            let options = Mp4CaptureOptions::new(fps).unwrap();
+            assert_eq!(options.frames_per_second(), fps);
+            assert!(!options.audio_enabled());
+            assert!(options.with_audio(true).audio_enabled());
         }
         assert!(matches!(
             Mp4CaptureOptions::new(0),

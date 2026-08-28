@@ -2,7 +2,7 @@ use std::{
     fs,
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc, Arc, Mutex,
     },
     thread,
@@ -11,7 +11,7 @@ use std::{
 
 use frameflow_capture::{CaptureSession, DisplayInfo, PhysicalRect, RegionSelection};
 use frameflow_core::{OutputConfig, RecordingAction, RecordingState, RecordingStateMachine};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, State};
 
 struct AppState {
@@ -21,6 +21,23 @@ struct AppState {
     recent_recordings: Mutex<Vec<RecordingSummary>>,
     native_selection: Mutex<Option<frameflow_windows::NativeSelectionSession>>,
     output_config: Mutex<OutputConfig>,
+    audio_config: Mutex<AudioInputConfig>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AudioInputConfig {
+    microphone: bool,
+    system_audio: bool,
+}
+
+impl Default for AudioInputConfig {
+    fn default() -> Self {
+        Self {
+            microphone: false,
+            system_audio: true,
+        }
+    }
 }
 
 struct ActiveSelection {
@@ -30,6 +47,7 @@ struct ActiveSelection {
 
 struct ActiveCapture {
     session: frameflow_windows::WgcCaptureSession,
+    audio: Option<ActiveAudioCapture>,
     frame_count: Arc<AtomicU64>,
     last_error: Arc<Mutex<Option<String>>>,
     started_at: Instant,
@@ -37,6 +55,20 @@ struct ActiveCapture {
     paused_total: Duration,
     temporary_path: PathBuf,
     output_path: PathBuf,
+}
+
+struct ActiveAudioCapture {
+    sources: Vec<ActiveAudioSource>,
+    mixer: Arc<Mutex<frameflow_windows::AudioMixer>>,
+    output: frameflow_windows::WgcAudioInput,
+    paused: Arc<AtomicBool>,
+    pause_offset_100ns: Arc<AtomicU64>,
+}
+
+struct ActiveAudioSource {
+    id: frameflow_windows::AudioSourceId,
+    session: frameflow_windows::WasapiCaptureSession,
+    normalizer: Arc<Mutex<Option<frameflow_windows::AudioNormalizer>>>,
 }
 
 #[derive(Serialize)]
@@ -70,7 +102,7 @@ struct InputSnapshot {
     enabled: bool,
     available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    device_name: Option<&'static str>,
+    device_name: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -174,27 +206,86 @@ fn get_app_snapshot(
         .ok()
         .and_then(|display| display.refresh_rate_hz);
     let recommended_capture_fps = recommended_capture_fps(monitor_refresh_rate_hz);
+    let audio_endpoints = frameflow_windows::default_audio_endpoints().unwrap_or_default();
+    let audio_config = *state
+        .audio_config
+        .lock()
+        .map_err(|_| "audio settings are unavailable".to_owned())?;
+    let audio_label = match (audio_config.system_audio, audio_config.microphone) {
+        (true, true) => "系统声 + 麦克风",
+        (true, false) => "系统声",
+        (false, true) => "麦克风",
+        (false, false) => "无音频",
+    };
+    let codec_label = if audio_config.system_audio || audio_config.microphone {
+        "H.264/AAC"
+    } else {
+        "H.264"
+    };
 
     Ok(AppSnapshot {
         recording_state,
         save_directory,
         microphone: InputSnapshot {
-            enabled: false,
-            available: false,
-            device_name: Some("尚未接入"),
+            enabled: audio_config.microphone,
+            available: audio_endpoints.microphone.is_some(),
+            device_name: audio_endpoints.microphone.map(|endpoint| endpoint.name),
         },
         system_audio: InputSnapshot {
-            enabled: false,
-            available: false,
-            device_name: None,
+            enabled: audio_config.system_audio,
+            available: audio_endpoints.system_output.is_some(),
+            device_name: audio_endpoints.system_output.map(|endpoint| endpoint.name),
         },
-        output_summary: format!("MP4 · H.264 · {capture_fps} FPS · 当前无音频"),
+        output_summary: format!("MP4 · {codec_label} · {capture_fps} FPS · {audio_label}"),
         capture_fps,
         supported_capture_fps: SUPPORTED_CAPTURE_FPS,
         monitor_refresh_rate_hz,
         recommended_capture_fps,
         recent_recordings,
     })
+}
+
+#[tauri::command]
+fn set_audio_input(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    source: String,
+    enabled: bool,
+) -> Result<(), String> {
+    if state
+        .recording
+        .lock()
+        .map_err(|_| "recording state is unavailable".to_owned())?
+        .state()
+        != RecordingState::Idle
+    {
+        return Err("audio inputs can only be changed while idle".to_owned());
+    }
+    if enabled {
+        let endpoints =
+            frameflow_windows::default_audio_endpoints().map_err(|error| error.to_string())?;
+        let available = match source.as_str() {
+            "microphone" => endpoints.microphone.is_some(),
+            "systemAudio" => endpoints.system_output.is_some(),
+            _ => return Err("unknown audio input".to_owned()),
+        };
+        if !available {
+            return Err("the selected audio input is unavailable".to_owned());
+        }
+    }
+    let next = {
+        let mut config = state
+            .audio_config
+            .lock()
+            .map_err(|_| "audio settings are unavailable".to_owned())?;
+        match source.as_str() {
+            "microphone" => config.microphone = enabled,
+            "systemAudio" => config.system_audio = enabled,
+            _ => return Err("unknown audio input".to_owned()),
+        }
+        *config
+    };
+    save_audio_config(&app, next)
 }
 
 #[tauri::command]
@@ -548,8 +639,14 @@ fn start_capture(
         .map_err(|_| "output settings are unavailable".to_owned())?
         .main
         .fps;
+    let audio_config = *state
+        .audio_config
+        .lock()
+        .map_err(|_| "audio settings are unavailable".to_owned())?;
+    let audio_enabled = audio_config.system_audio || audio_config.microphone;
     let capture_options = frameflow_windows::Mp4CaptureOptions::new(u32::from(capture_fps))
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())?
+        .with_audio(audio_enabled);
     let frame_count = Arc::new(AtomicU64::new(0));
     let last_error = Arc::new(Mutex::new(None));
     let session = frameflow_windows::start_region_mp4_capture(
@@ -570,6 +667,19 @@ fn start_capture(
         },
     )
     .map_err(|error| error.to_string())?;
+    let audio = if audio_enabled {
+        let output = session
+            .audio_input()
+            .ok_or_else(|| "audio encoder input is unavailable".to_owned())?;
+        Some(start_active_audio(
+            audio_config,
+            output,
+            frameflow_windows::performance_time_100ns().ok(),
+            Arc::clone(&last_error),
+        ))
+    } else {
+        None
+    };
 
     let next_state = state
         .recording
@@ -582,6 +692,7 @@ fn start_capture(
         .lock()
         .map_err(|_| "capture state is unavailable".to_owned())? = Some(ActiveCapture {
         session,
+        audio,
         frame_count,
         last_error,
         started_at: Instant::now(),
@@ -596,6 +707,144 @@ fn start_capture(
     Ok(next_state)
 }
 
+fn start_active_audio(
+    config: AudioInputConfig,
+    output: frameflow_windows::WgcAudioInput,
+    timeline_origin_100ns: Option<u64>,
+    last_error: Arc<Mutex<Option<String>>>,
+) -> ActiveAudioCapture {
+    let mixer_config = frameflow_windows::AudioMixerConfig {
+        system: frameflow_windows::AudioSourceControl {
+            enabled: config.system_audio,
+            ..frameflow_windows::AudioSourceControl::default()
+        },
+        microphone: frameflow_windows::AudioSourceControl {
+            enabled: config.microphone,
+            ..frameflow_windows::AudioSourceControl::default()
+        },
+        ..frameflow_windows::AudioMixerConfig::default()
+    };
+    let mixer = Arc::new(Mutex::new(match timeline_origin_100ns {
+        Some(origin) => frameflow_windows::AudioMixer::with_origin(mixer_config, origin),
+        None => frameflow_windows::AudioMixer::new(mixer_config),
+    }));
+    let paused = Arc::new(AtomicBool::new(false));
+    let pause_offset_100ns = Arc::new(AtomicU64::new(0));
+    let mut sources = Vec::new();
+    for (enabled, capture_source, source_id) in [
+        (
+            config.system_audio,
+            frameflow_windows::AudioCaptureSource::SystemOutput,
+            frameflow_windows::AudioSourceId::System,
+        ),
+        (
+            config.microphone,
+            frameflow_windows::AudioCaptureSource::Microphone,
+            frameflow_windows::AudioSourceId::Microphone,
+        ),
+    ] {
+        if !enabled {
+            continue;
+        }
+        match start_audio_source(
+            capture_source,
+            source_id,
+            Arc::clone(&mixer),
+            output.clone(),
+            Arc::clone(&paused),
+            Arc::clone(&pause_offset_100ns),
+            Arc::clone(&last_error),
+        ) {
+            Ok(source) => sources.push(source),
+            Err(error) => {
+                record_audio_error(&last_error, error.to_string());
+                if let Ok(mut mixer) = mixer.lock() {
+                    let mut control = mixer.source_control(source_id);
+                    control.enabled = false;
+                    mixer.set_source_control(source_id, control);
+                }
+            }
+        }
+    }
+    ActiveAudioCapture {
+        sources,
+        mixer,
+        output,
+        paused,
+        pause_offset_100ns,
+    }
+}
+
+fn start_audio_source(
+    capture_source: frameflow_windows::AudioCaptureSource,
+    source_id: frameflow_windows::AudioSourceId,
+    mixer: Arc<Mutex<frameflow_windows::AudioMixer>>,
+    output: frameflow_windows::WgcAudioInput,
+    paused: Arc<AtomicBool>,
+    pause_offset_100ns: Arc<AtomicU64>,
+    last_error: Arc<Mutex<Option<String>>>,
+) -> Result<ActiveAudioSource, frameflow_windows::PlatformError> {
+    let normalizer = Arc::new(Mutex::new(None::<frameflow_windows::AudioNormalizer>));
+    let callback_normalizer = Arc::clone(&normalizer);
+    let mut failed = false;
+    let session = frameflow_windows::start_wasapi_capture(capture_source, move |result| {
+        if failed || paused.load(Ordering::Acquire) {
+            return;
+        }
+        let result = result.and_then(|mut packet| {
+            packet.qpc_position_100ns = packet
+                .qpc_position_100ns
+                .saturating_sub(pause_offset_100ns.load(Ordering::Acquire));
+            let chunk = {
+                let mut normalizer = callback_normalizer.lock().map_err(|_| {
+                    frameflow_windows::PlatformError::AudioCapture(
+                        "audio normalizer is unavailable".to_owned(),
+                    )
+                })?;
+                if normalizer.is_none() {
+                    *normalizer = Some(frameflow_windows::AudioNormalizer::new(packet.format)?);
+                }
+                normalizer
+                    .as_mut()
+                    .expect("audio normalizer was initialized")
+                    .push(&packet)?
+            };
+            let blocks = mixer
+                .lock()
+                .map_err(|_| {
+                    frameflow_windows::PlatformError::AudioCapture(
+                        "audio mixer is unavailable".to_owned(),
+                    )
+                })?
+                .push(source_id, chunk);
+            for block in blocks {
+                output.submit(block)?;
+            }
+            Ok(())
+        });
+        if let Err(error) = result {
+            record_audio_error(&last_error, error.to_string());
+            if let Ok(mut mixer) = mixer.lock() {
+                let mut control = mixer.source_control(source_id);
+                control.enabled = false;
+                mixer.set_source_control(source_id, control);
+            }
+            failed = true;
+        }
+    })?;
+    Ok(ActiveAudioSource {
+        id: source_id,
+        session,
+        normalizer,
+    })
+}
+
+fn record_audio_error(last_error: &Arc<Mutex<Option<String>>>, message: String) {
+    if let Ok(mut last_error) = last_error.lock() {
+        *last_error = Some(format!("音频已降级：{message}"));
+    }
+}
+
 #[tauri::command]
 fn pause_capture(
     app: tauri::AppHandle,
@@ -608,7 +857,15 @@ fn pause_capture(
     let active = capture
         .as_mut()
         .ok_or_else(|| "capture session is unavailable".to_owned())?;
-    active.session.pause().map_err(|error| error.to_string())?;
+    if let Some(audio) = active.audio.as_ref() {
+        audio.paused.store(true, Ordering::Release);
+    }
+    if let Err(error) = active.session.pause() {
+        if let Some(audio) = active.audio.as_ref() {
+            audio.paused.store(false, Ordering::Release);
+        }
+        return Err(error.to_string());
+    }
     active.paused_at = Some(Instant::now());
     let next_state = state
         .recording
@@ -635,7 +892,14 @@ fn resume_capture(
         .ok_or_else(|| "capture session is unavailable".to_owned())?;
     active.session.resume().map_err(|error| error.to_string())?;
     if let Some(paused_at) = active.paused_at.take() {
-        active.paused_total += paused_at.elapsed();
+        let paused_for = paused_at.elapsed();
+        active.paused_total += paused_for;
+        if let Some(audio) = active.audio.as_ref() {
+            audio
+                .pause_offset_100ns
+                .fetch_add(duration_to_100ns(paused_for), Ordering::AcqRel);
+            audio.paused.store(false, Ordering::Release);
+        }
     }
     let next_state = state
         .recording
@@ -724,6 +988,7 @@ fn spawn_capture_finalizer(app: tauri::AppHandle, active: ActiveCapture) {
 fn finalize_active_capture(active: ActiveCapture) -> Result<FinalizedCapture, String> {
     let ActiveCapture {
         session,
+        audio,
         started_at,
         paused_at,
         paused_total,
@@ -735,6 +1000,9 @@ fn finalize_active_capture(active: ActiveCapture) -> Result<FinalizedCapture, St
     let duration = clock_end
         .duration_since(started_at)
         .saturating_sub(paused_total);
+    if let Some(audio) = audio {
+        stop_active_audio(audio);
+    }
     session.stop().map_err(|error| error.to_string())?;
     fs::rename(&temporary_path, &output_path)
         .map_err(|error| format!("failed to finalize recording file: {error}"))?;
@@ -742,6 +1010,44 @@ fn finalize_active_capture(active: ActiveCapture) -> Result<FinalizedCapture, St
         output_path,
         duration,
     })
+}
+
+fn stop_active_audio(mut audio: ActiveAudioCapture) {
+    audio.paused.store(true, Ordering::Release);
+    for source in audio.sources.drain(..) {
+        let _ = source.session.stop();
+        let tail = source.normalizer.lock().ok().and_then(|mut normalizer| {
+            normalizer
+                .as_mut()
+                .map(frameflow_windows::AudioNormalizer::finish)
+        });
+        if let Some(tail) = tail.filter(|chunk| chunk.frames() > 0) {
+            if let Ok(mut mixer) = audio.mixer.lock() {
+                let blocks = mixer.push(source.id, tail);
+                submit_final_audio_blocks(&audio.output, blocks);
+            }
+        }
+    }
+    if let Ok(mut mixer) = audio.mixer.lock() {
+        let final_blocks = mixer.finish();
+        submit_final_audio_blocks(&audio.output, final_blocks);
+    }
+}
+
+fn submit_final_audio_blocks(
+    output: &frameflow_windows::WgcAudioInput,
+    blocks: Vec<frameflow_windows::MixedAudioBlock>,
+) {
+    for block in blocks {
+        let _ = output.submit_wait(block, Duration::from_millis(500));
+    }
+}
+
+fn duration_to_100ns(duration: Duration) -> u64 {
+    duration
+        .as_nanos()
+        .saturating_div(100)
+        .min(u128::from(u64::MAX)) as u64
 }
 
 fn complete_finalization(app: &tauri::AppHandle, result: Result<FinalizedCapture, String>) {
@@ -937,6 +1243,32 @@ fn save_output_config(app: &tauri::AppHandle, config: &OutputConfig) -> Result<(
     fs::write(path, json).map_err(|error| error.to_string())
 }
 
+fn audio_config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|directory| directory.join("audio.json"))
+        .map_err(|error| error.to_string())
+}
+
+fn load_audio_config(app: &tauri::AppHandle) -> AudioInputConfig {
+    audio_config_path(app)
+        .and_then(|path| fs::read(path).map_err(|error| error.to_string()))
+        .and_then(|bytes| {
+            serde_json::from_slice::<AudioInputConfig>(&bytes).map_err(|error| error.to_string())
+        })
+        .unwrap_or_default()
+}
+
+fn save_audio_config(app: &tauri::AppHandle, config: AudioInputConfig) -> Result<(), String> {
+    let path = audio_config_path(app)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "audio settings directory is unavailable".to_owned())?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let json = serde_json::to_vec_pretty(&config).map_err(|error| error.to_string())?;
+    fs::write(path, json).map_err(|error| error.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "windows")]
@@ -951,6 +1283,7 @@ pub fn run() {
             recent_recordings: Mutex::new(Vec::new()),
             native_selection: Mutex::new(None),
             output_config: Mutex::new(OutputConfig::default().normalized()),
+            audio_config: Mutex::new(AudioInputConfig::default()),
         })
         .setup(|app| {
             let config = load_output_config(app.handle());
@@ -958,11 +1291,17 @@ pub fn run() {
                 .output_config
                 .lock()
                 .expect("output settings are unavailable") = config;
+            let audio_config = load_audio_config(app.handle());
+            *app.state::<AppState>()
+                .audio_config
+                .lock()
+                .expect("audio settings are unavailable") = audio_config;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_app_snapshot,
             set_capture_fps,
+            set_audio_input,
             begin_selection,
             get_current_selection,
             redraw_selection,

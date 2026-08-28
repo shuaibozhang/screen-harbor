@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { beginSelection, getAppSnapshot, setCaptureFps } from "./bridge";
+import { beginSelection, getAppSnapshot, setAudioInput, setCaptureFps } from "./bridge";
 import type { AppSnapshot } from "./domain";
 
 interface AppStore {
@@ -9,6 +9,7 @@ interface AppStore {
   hydrate: () => Promise<void>;
   startSelection: () => Promise<void>;
   updateCaptureFps: (fps: number) => Promise<void>;
+  updateAudioInput: (source: "microphone" | "systemAudio", enabled: boolean) => Promise<void>;
 }
 
 export const useAppStore = create<AppStore>((set) => ({
@@ -36,6 +37,15 @@ export const useAppStore = create<AppStore>((set) => ({
       set({ snapshot: await getAppSnapshot(), error: null });
     } catch (cause) {
       set({ error: `无法保存帧率设置：${String(cause)}` });
+      throw cause;
+    }
+  },
+  updateAudioInput: async (source, enabled) => {
+    try {
+      await setAudioInput(source, enabled);
+      set({ snapshot: await getAppSnapshot(), error: null });
+    } catch (cause) {
+      set({ error: `无法更新音频输入：${String(cause)}` });
       throw cause;
     }
   },

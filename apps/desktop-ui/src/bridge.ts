@@ -5,7 +5,7 @@ const developmentSnapshot: AppSnapshot = {
   recordingState: "idle",
   saveDirectory: "D:\\FrameFlow\\Recordings",
   microphone: { enabled: true, deviceName: "默认麦克风", available: true },
-  systemAudio: { enabled: true, available: true },
+  systemAudio: { enabled: false, deviceName: "扬声器（默认设备）", available: true },
   outputSummary: "MP4 · 有声音 / WebM · 480p · 有声音 / 封面",
   captureFps: 30,
   supportedCaptureFps: [24, 30, 60],
@@ -26,4 +26,11 @@ export async function beginSelection(): Promise<void> {
 
 export async function setCaptureFps(fps: number): Promise<number> {
   return isTauri() ? invoke<number>("set_capture_fps", { fps }) : fps;
+}
+
+export async function setAudioInput(
+  source: "microphone" | "systemAudio",
+  enabled: boolean,
+): Promise<void> {
+  if (isTauri()) await invoke("set_audio_input", { source, enabled });
 }
