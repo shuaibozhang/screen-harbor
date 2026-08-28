@@ -38,16 +38,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let first_error = Arc::new(Mutex::new(None));
-    let session = frameflow_windows::start_region_mp4_capture(&selection, &output, {
-        let first_error = Arc::clone(&first_error);
-        move |result| {
-            if let Err(error) = result {
-                if let Ok(mut slot) = first_error.lock() {
-                    slot.get_or_insert_with(|| error.to_string());
+    let session = frameflow_windows::start_region_mp4_capture(
+        &selection,
+        &output,
+        frameflow_windows::Mp4CaptureOptions::default(),
+        {
+            let first_error = Arc::clone(&first_error);
+            move |result| {
+                if let Err(error) = result {
+                    if let Ok(mut slot) = first_error.lock() {
+                        slot.get_or_insert_with(|| error.to_string());
+                    }
                 }
             }
-        }
-    })?;
+        },
+    )?;
     thread::sleep(Duration::from_secs(5));
     let stop_result = session.stop();
     if let Some(error) = first_error.lock().ok().and_then(|slot| slot.clone()) {

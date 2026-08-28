@@ -366,4 +366,12 @@ mod tests {
             10_000_000
         );
     }
+
+    #[test]
+    fn configured_frame_rates_each_land_exactly_on_one_second() {
+        for frame_rate in [24, 30, 60] {
+            let timeline = SampleTimeline::new(frame_rate);
+            assert_eq!(timeline.time_for_frame(u64::from(frame_rate)), 10_000_000);
+        }
+    }
 }

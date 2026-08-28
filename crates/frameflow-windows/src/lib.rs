@@ -9,7 +9,7 @@ pub use displays::{enable_per_monitor_v2_dpi, list_displays};
 pub use selection_overlay::{start_native_selection, NativeSelectionSession};
 pub use wgc::{
     capture_primary_frame, capture_region_frame, start_region_capture, start_region_mp4_capture,
-    CapturedFrameInfo, WgcCaptureSession,
+    CapturedFrameInfo, Mp4CaptureOptions, WgcCaptureSession,
 };
 
 use thiserror::Error;
@@ -50,6 +50,8 @@ pub enum PlatformError {
     WorkerControlTimeout(&'static str),
     #[error("Media Foundation pipeline failed: {0}")]
     MediaFoundation(String),
+    #[error("unsupported output frame rate: {0} FPS")]
+    InvalidFrameRate(u32),
 }
 
 pub fn flush_desktop_compositor() -> Result<(), PlatformError> {

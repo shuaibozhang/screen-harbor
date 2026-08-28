@@ -846,6 +846,7 @@ dependencies = [
  "frameflow-core",
  "frameflow-windows",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
 ]

@@ -23,6 +23,9 @@ pub struct DisplayInfo {
     pub primary: bool,
     pub dpi_x: u32,
     pub dpi_y: u32,
+    /// Nominal desktop refresh rate reported by Windows. This is not a live
+    /// measurement and may differ from the instantaneous VRR rate.
+    pub refresh_rate_hz: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,6 +165,7 @@ mod tests {
             primary: false,
             dpi_x: dpi,
             dpi_y: dpi,
+            refresh_rate_hz: Some(60),
         }
     }
 

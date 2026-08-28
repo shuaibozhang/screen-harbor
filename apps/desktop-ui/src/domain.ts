@@ -27,6 +27,10 @@ export interface AppSnapshot {
   microphone: { enabled: boolean; deviceName: string; available: boolean };
   systemAudio: { enabled: boolean; available: boolean };
   outputSummary: string;
+  captureFps: number;
+  supportedCaptureFps: number[];
+  monitorRefreshRateHz?: number;
+  recommendedCaptureFps: number;
   recentRecordings: RecentRecording[];
 }
 

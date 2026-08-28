@@ -1,9 +1,12 @@
 use frameflow_capture::{DisplayInfo, PhysicalRect};
 use windows::{
-    core::{Error as WindowsError, BOOL},
+    core::{Error as WindowsError, BOOL, PCWSTR},
     Win32::{
         Foundation::{LPARAM, RECT},
-        Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO},
+        Graphics::Gdi::{
+            EnumDisplayMonitors, EnumDisplaySettingsW, GetMonitorInfoW, DEVMODEW,
+            ENUM_CURRENT_SETTINGS, HDC, HMONITOR, MONITORINFOEXW,
+        },
         UI::{
             HiDpi::{
                 AreDpiAwarenessContextsEqual, GetDpiForMonitor, GetThreadDpiAwarenessContext,
@@ -100,17 +103,20 @@ unsafe extern "system" fn collect_monitor(
     context: LPARAM,
 ) -> BOOL {
     let collector = unsafe { &mut *(context.0 as *mut MonitorCollector) };
-    let mut info = MONITORINFO {
-        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+    let mut info = MONITORINFOEXW {
+        monitorInfo: windows::Win32::Graphics::Gdi::MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFOEXW>() as u32,
+            ..Default::default()
+        },
         ..Default::default()
     };
 
-    if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+    if !unsafe { GetMonitorInfoW(monitor, &mut info.monitorInfo) }.as_bool() {
         collector.error = Some(WindowsError::from_win32());
         return false.into();
     }
 
-    let bounds = info.rcMonitor;
+    let bounds = info.monitorInfo.rcMonitor;
     let mut dpi_x = 0;
     let mut dpi_y = 0;
     if let Err(error) =
@@ -128,10 +134,29 @@ unsafe extern "system" fn collect_monitor(
             width: (bounds.right - bounds.left).max(0) as u32,
             height: (bounds.bottom - bounds.top).max(0) as u32,
         },
-        primary: info.dwFlags & MONITORINFOF_PRIMARY == MONITORINFOF_PRIMARY,
+        primary: info.monitorInfo.dwFlags & MONITORINFOF_PRIMARY == MONITORINFOF_PRIMARY,
         dpi_x,
         dpi_y,
+        refresh_rate_hz: nominal_refresh_rate(&info),
     });
 
     true.into()
+}
+
+fn nominal_refresh_rate(info: &MONITORINFOEXW) -> Option<u32> {
+    let mut mode = DEVMODEW {
+        dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+        ..Default::default()
+    };
+    let found = unsafe {
+        EnumDisplaySettingsW(
+            PCWSTR(info.szDevice.as_ptr()),
+            ENUM_CURRENT_SETTINGS,
+            &mut mode,
+        )
+    };
+    found
+        .as_bool()
+        .then_some(mode.dmDisplayFrequency)
+        .filter(|rate| *rate > 1)
 }

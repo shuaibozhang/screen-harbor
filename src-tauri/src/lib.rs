@@ -10,7 +10,7 @@ use std::{
 };
 
 use frameflow_capture::{CaptureSession, DisplayInfo, PhysicalRect, RegionSelection};
-use frameflow_core::{RecordingAction, RecordingState, RecordingStateMachine};
+use frameflow_core::{OutputConfig, RecordingAction, RecordingState, RecordingStateMachine};
 use serde::Serialize;
 use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, State};
 
@@ -20,6 +20,7 @@ struct AppState {
     capture: Mutex<Option<ActiveCapture>>,
     recent_recordings: Mutex<Vec<RecordingSummary>>,
     native_selection: Mutex<Option<frameflow_windows::NativeSelectionSession>>,
+    output_config: Mutex<OutputConfig>,
 }
 
 struct ActiveSelection {
@@ -79,7 +80,11 @@ struct AppSnapshot {
     save_directory: String,
     microphone: InputSnapshot,
     system_audio: InputSnapshot,
-    output_summary: &'static str,
+    output_summary: String,
+    capture_fps: u16,
+    supported_capture_fps: [u16; 3],
+    monitor_refresh_rate_hz: Option<u32>,
+    recommended_capture_fps: u16,
     recent_recordings: Vec<RecordingSummary>,
 }
 
@@ -105,8 +110,48 @@ enum OutputStatus {
     Failed,
 }
 
+const SUPPORTED_CAPTURE_FPS: [u16; 3] = [24, 30, 60];
+
+fn recommended_capture_fps(refresh_rate_hz: Option<u32>) -> u16 {
+    let Some(refresh_rate_hz) = refresh_rate_hz else {
+        return 30;
+    };
+    SUPPORTED_CAPTURE_FPS
+        .into_iter()
+        .rev()
+        .find(|fps| u32::from(*fps) <= refresh_rate_hz.saturating_add(1))
+        .unwrap_or(SUPPORTED_CAPTURE_FPS[0])
+}
+
+fn active_display(app: &tauri::AppHandle) -> Result<DisplayInfo, String> {
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window is unavailable".to_owned())?;
+    let monitor = main
+        .current_monitor()
+        .map_err(|error| error.to_string())?
+        .or_else(|| main.primary_monitor().ok().flatten())
+        .ok_or_else(|| "no active display is available".to_owned())?;
+    let position = *monitor.position();
+    let size = *monitor.size();
+
+    frameflow_windows::list_displays()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|display| {
+            display.bounds.x == position.x
+                && display.bounds.y == position.y
+                && display.bounds.width == size.width
+                && display.bounds.height == size.height
+        })
+        .ok_or_else(|| "active display geometry is unavailable".to_owned())
+}
+
 #[tauri::command]
-fn get_app_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
+fn get_app_snapshot(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<AppSnapshot, String> {
     let recording_state = state
         .recording
         .lock()
@@ -119,6 +164,16 @@ fn get_app_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
         .lock()
         .map_err(|_| "recent recordings are unavailable".to_owned())?
         .clone();
+    let capture_fps = state
+        .output_config
+        .lock()
+        .map_err(|_| "output settings are unavailable".to_owned())?
+        .main
+        .fps;
+    let monitor_refresh_rate_hz = active_display(&app)
+        .ok()
+        .and_then(|display| display.refresh_rate_hz);
+    let recommended_capture_fps = recommended_capture_fps(monitor_refresh_rate_hz);
 
     Ok(AppSnapshot {
         recording_state,
@@ -133,9 +188,47 @@ fn get_app_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
             available: false,
             device_name: None,
         },
-        output_summary: "MP4 · H.264 · 当前无音频",
+        output_summary: format!("MP4 · H.264 · {capture_fps} FPS · 当前无音频"),
+        capture_fps,
+        supported_capture_fps: SUPPORTED_CAPTURE_FPS,
+        monitor_refresh_rate_hz,
+        recommended_capture_fps,
         recent_recordings,
     })
+}
+
+#[tauri::command]
+fn set_capture_fps(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    fps: u16,
+) -> Result<u16, String> {
+    if !SUPPORTED_CAPTURE_FPS.contains(&fps) {
+        return Err(format!("unsupported capture frame rate: {fps} FPS"));
+    }
+    if state
+        .recording
+        .lock()
+        .map_err(|_| "recording state is unavailable".to_owned())?
+        .state()
+        != RecordingState::Idle
+    {
+        return Err("frame rate can only be changed while idle".to_owned());
+    }
+
+    let mut next = state
+        .output_config
+        .lock()
+        .map_err(|_| "output settings are unavailable".to_owned())?
+        .clone();
+    next.main.fps = fps;
+    next = next.normalized();
+    save_output_config(&app, &next)?;
+    *state
+        .output_config
+        .lock()
+        .map_err(|_| "output settings are unavailable".to_owned())? = next;
+    Ok(fps)
 }
 
 #[tauri::command]
@@ -161,24 +254,7 @@ fn begin_selection(
     let controls = app
         .get_webview_window("recording-controls")
         .ok_or_else(|| "recording controls window is unavailable".to_owned())?;
-    let monitor = main
-        .current_monitor()
-        .map_err(|error| error.to_string())?
-        .or_else(|| main.primary_monitor().ok().flatten())
-        .ok_or_else(|| "no active display is available".to_owned())?;
-
-    let position = *monitor.position();
-    let size = *monitor.size();
-    let display = frameflow_windows::list_displays()
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .find(|display| {
-            display.bounds.x == position.x
-                && display.bounds.y == position.y
-                && display.bounds.width == size.width
-                && display.bounds.height == size.height
-        })
-        .ok_or_else(|| "active display geometry is unavailable".to_owned())?;
+    let display = active_display(&app)?;
 
     overlay.hide().map_err(|error| error.to_string())?;
     controls.hide().map_err(|error| error.to_string())?;
@@ -466,20 +542,33 @@ fn start_capture(
     frameflow_windows::flush_desktop_compositor().map_err(|error| error.to_string())?;
 
     let (temporary_path, output_path) = allocate_recording_paths()?;
+    let capture_fps = state
+        .output_config
+        .lock()
+        .map_err(|_| "output settings are unavailable".to_owned())?
+        .main
+        .fps;
+    let capture_options = frameflow_windows::Mp4CaptureOptions::new(u32::from(capture_fps))
+        .map_err(|error| error.to_string())?;
     let frame_count = Arc::new(AtomicU64::new(0));
     let last_error = Arc::new(Mutex::new(None));
-    let session = frameflow_windows::start_region_mp4_capture(&selection, &temporary_path, {
-        let frame_count = Arc::clone(&frame_count);
-        let last_error = Arc::clone(&last_error);
-        move |result| match result {
-            Ok(frame) => frame_count.store(frame.sequence, Ordering::Release),
-            Err(error) => {
-                if let Ok(mut last_error) = last_error.lock() {
-                    *last_error = Some(error.to_string());
+    let session = frameflow_windows::start_region_mp4_capture(
+        &selection,
+        &temporary_path,
+        capture_options,
+        {
+            let frame_count = Arc::clone(&frame_count);
+            let last_error = Arc::clone(&last_error);
+            move |result| match result {
+                Ok(frame) => frame_count.store(frame.sequence, Ordering::Release),
+                Err(error) => {
+                    if let Ok(mut last_error) = last_error.lock() {
+                        *last_error = Some(error.to_string());
+                    }
                 }
             }
-        }
-    })
+        },
+    )
     .map_err(|error| error.to_string())?;
 
     let next_state = state
@@ -812,6 +901,42 @@ fn allocate_recording_paths() -> Result<(PathBuf, PathBuf), String> {
     ))
 }
 
+fn output_config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|directory| directory.join("output.json"))
+        .map_err(|error| error.to_string())
+}
+
+fn load_output_config(app: &tauri::AppHandle) -> OutputConfig {
+    output_config_path(app)
+        .and_then(|path| fs::read(path).map_err(|error| error.to_string()))
+        .and_then(|bytes| {
+            serde_json::from_slice::<OutputConfig>(&bytes).map_err(|error| error.to_string())
+        })
+        .map(normalize_loaded_output_config)
+        .unwrap_or_else(|_| OutputConfig::default().normalized())
+}
+
+fn normalize_loaded_output_config(config: OutputConfig) -> OutputConfig {
+    let config = config.normalized();
+    if SUPPORTED_CAPTURE_FPS.contains(&config.main.fps) {
+        config
+    } else {
+        OutputConfig::default().normalized()
+    }
+}
+
+fn save_output_config(app: &tauri::AppHandle, config: &OutputConfig) -> Result<(), String> {
+    let path = output_config_path(app)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "output settings directory is unavailable".to_owned())?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let json = serde_json::to_vec_pretty(config).map_err(|error| error.to_string())?;
+    fs::write(path, json).map_err(|error| error.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "windows")]
@@ -825,9 +950,19 @@ pub fn run() {
             capture: Mutex::new(None),
             recent_recordings: Mutex::new(Vec::new()),
             native_selection: Mutex::new(None),
+            output_config: Mutex::new(OutputConfig::default().normalized()),
+        })
+        .setup(|app| {
+            let config = load_output_config(app.handle());
+            *app.state::<AppState>()
+                .output_config
+                .lock()
+                .expect("output settings are unavailable") = config;
+            Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_app_snapshot,
+            set_capture_fps,
             begin_selection,
             get_current_selection,
             redraw_selection,
@@ -842,4 +977,33 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run FrameFlow");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_supported_persisted_frame_rate() {
+        let mut config = OutputConfig::default();
+        config.main.fps = 60;
+        assert_eq!(normalize_loaded_output_config(config).main.fps, 60);
+    }
+
+    #[test]
+    fn rejects_unsupported_persisted_frame_rate() {
+        let mut config = OutputConfig::default();
+        config.main.fps = 25;
+        assert_eq!(normalize_loaded_output_config(config).main.fps, 30);
+    }
+
+    #[test]
+    fn recommends_standard_rate_without_exceeding_nominal_refresh() {
+        assert_eq!(recommended_capture_fps(None), 30);
+        assert_eq!(recommended_capture_fps(Some(24)), 24);
+        assert_eq!(recommended_capture_fps(Some(30)), 30);
+        assert_eq!(recommended_capture_fps(Some(59)), 60);
+        assert_eq!(recommended_capture_fps(Some(60)), 60);
+        assert_eq!(recommended_capture_fps(Some(144)), 60);
+    }
 }

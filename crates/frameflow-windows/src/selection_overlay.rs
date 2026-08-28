@@ -133,6 +133,9 @@ struct BorderWindowBinding {
 struct BorderResources {
     windows: Vec<HWND>,
     _state: Box<BorderState>,
+    // Each allocation must remain stable because its address is stored in
+    // GWLP_USERDATA before the vector has finished growing.
+    #[allow(clippy::vec_box)]
     _bindings: Vec<Box<BorderWindowBinding>>,
     brush: windows::Win32::Graphics::Gdi::HBRUSH,
     class_name: Vec<u16>,

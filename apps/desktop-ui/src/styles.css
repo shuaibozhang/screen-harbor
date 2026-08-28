@@ -69,6 +69,24 @@ button.row:hover { border-color: #ccd4e4; background: #fbfcfe; }
 .empty small { font-size: 11px; }
 .recent-list { max-height: 150px; overflow-y: auto; }
 
+.settings-backdrop { position: fixed; z-index: 20; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(25, 32, 45, .38); backdrop-filter: blur(3px); }
+.settings-dialog { width: min(430px, 100%); padding: 22px; background: #fff; border: 1px solid #dfe4eb; border-radius: 16px; box-shadow: 0 24px 70px rgba(25, 34, 49, .28); }
+.settings-dialog header { display: flex; align-items: flex-start; justify-content: space-between; }
+.settings-dialog header p { margin: 0 0 4px; color: #4269e1; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.settings-dialog h2 { margin: 0; font-size: 20px; }
+.settings-help { margin: 14px 0 18px; color: #707b8d; font-size: 12px; line-height: 1.6; }
+.monitor-rate { display: flex; gap: 8px; align-items: center; margin: -7px 0 14px; padding: 9px 11px; color: #3657b5; background: #eef3ff; border-radius: 9px; font-size: 11px; font-weight: 650; }
+.fps-options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; }
+.fps-option { display: flex; min-height: 72px; flex-direction: column; gap: 6px; align-items: center; justify-content: center; border: 1px solid #dce2eb; color: #344056; background: #f8f9fb; border-radius: 11px; cursor: pointer; }
+.fps-option:hover { border-color: #aebce1; background: #f4f6fd; }
+.fps-option.selected { border-color: #4269e1; color: #3157c8; background: #eef2ff; box-shadow: inset 0 0 0 1px #4269e1; }
+.fps-option strong { font-size: 14px; }
+.fps-option small { color: #7b8494; font-size: 10px; }
+.fps-warning { margin: 12px 0 0; padding: 9px 11px; color: #8a5a18; background: #fff7e7; border: 1px solid #f1ddb7; border-radius: 9px; font-size: 11px; line-height: 1.5; }
+.settings-dialog footer { display: flex; justify-content: flex-end; gap: 9px; margin-top: 20px; }
+.settings-dialog footer button { min-width: 88px; height: 36px; border: 1px solid #d9dfe8; background: #fff; border-radius: 9px; cursor: pointer; }
+.settings-dialog footer .settings-save { border-color: #4169e1; color: #fff; background: #4169e1; }
+
 @media (prefers-color-scheme: dark) {
   :root, body { color: #edf1f8; background: #171b22; }
   .shell { background: #20252d; box-shadow: none; }
@@ -80,6 +98,16 @@ button.row:hover { border-color: #ccd4e4; background: #fbfcfe; }
   button.row:hover { border-color: #4b5665; background: #2d343e; }
   .empty { border-color: #3a424d; }
   .empty strong { color: #b7c0ce; }
+  .settings-backdrop { background: rgba(5, 8, 12, .58); }
+  .settings-dialog { border-color: #3a424d; background: #282e37; }
+  .settings-help, .fps-option small { color: #9ca6b5; }
+  .monitor-rate { color: #cbd8ff; background: #28385c; }
+  .fps-option { border-color: #404957; color: #dce3ed; background: #303741; }
+  .fps-option:hover { border-color: #5b6980; background: #343c48; }
+  .fps-option.selected { border-color: #6f8ff1; color: #dce5ff; background: #304374; }
+  .fps-warning { border-color: #65502d; color: #efd19f; background: #3c3221; }
+  .settings-dialog footer button { border-color: #46505e; color: #dce3ed; background: #303741; }
+  .settings-dialog footer .settings-save { border-color: #5579e8; background: #4169e1; }
 }
 
 @media (max-width: 680px) {

@@ -9,6 +9,7 @@ import {
   MonitorSpeaker,
   Settings2,
   Video,
+  X,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useAppStore } from "./store";
@@ -28,8 +29,11 @@ function StatusDot({ available }: { available: boolean }) {
 }
 
 export function App() {
-  const { snapshot, loading, error, hydrate, startSelection } = useAppStore();
+  const { snapshot, loading, error, hydrate, startSelection, updateCaptureFps } = useAppStore();
   const [finalizationError, setFinalizationError] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [draftFps, setDraftFps] = useState(30);
+  const [savingSettings, setSavingSettings] = useState(false);
 
   useEffect(() => {
     void hydrate();
@@ -66,11 +70,31 @@ export function App() {
     return <main className="shell loading">正在准备 FrameFlow…</main>;
   }
 
+  const openSettings = () => {
+    setDraftFps(snapshot.captureFps);
+    setSettingsOpen(true);
+  };
+
+  const saveSettings = async () => {
+    setSavingSettings(true);
+    try {
+      await updateCaptureFps(draftFps);
+      setSettingsOpen(false);
+    } catch {
+      // The store exposes the backend error in the main alert.
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  const exceedsMonitorRefresh = snapshot.monitorRefreshRateHz !== undefined
+    && draftFps > snapshot.monitorRefreshRateHz + 1;
+
   return (
     <main className="shell">
       <header className="titlebar">
         <div className="brand"><span className="brand-mark" />FrameFlow</div>
-        <button className="icon-button" aria-label="打开设置"><Settings2 size={18} /></button>
+        <button className="icon-button" aria-label="打开设置" onClick={openSettings}><Settings2 size={18} /></button>
       </header>
 
       <div className="content">
@@ -121,7 +145,7 @@ export function App() {
         </section>
 
         <section className="section output" aria-labelledby="output-heading">
-          <div className="section-heading"><h2 id="output-heading">输出</h2><button>调整</button></div>
+          <div className="section-heading"><h2 id="output-heading">输出</h2><button onClick={openSettings}>调整</button></div>
           <div className="row">
             <span className="row-icon"><Video size={19} /></span>
             <span className="row-copy"><strong>高清母版与轻量预览</strong><small>{snapshot.outputSummary}</small></span>
@@ -147,6 +171,51 @@ export function App() {
           )}
         </section>
       </div>
+      {settingsOpen && (
+        <div className="settings-backdrop" role="presentation" onMouseDown={(event) => {
+          if (event.target === event.currentTarget && !savingSettings) setSettingsOpen(false);
+        }}>
+          <section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+            <header>
+              <div><p>输出设置</p><h2 id="settings-title">录制帧率</h2></div>
+              <button className="icon-button" aria-label="关闭设置" disabled={savingSettings} onClick={() => setSettingsOpen(false)}><X size={18} /></button>
+            </header>
+            <p className="settings-help">帧率越高，滚动和动画越流畅，同时会增加编码负载和文件大小。</p>
+            <div className="monitor-rate">
+              <MonitorSpeaker size={16} />
+              <span>
+                {snapshot.monitorRefreshRateHz !== undefined
+                  ? `当前屏幕 ${snapshot.monitorRefreshRateHz} Hz · 推荐 ${snapshot.recommendedCaptureFps} FPS`
+                  : `未读取到屏幕刷新率 · 推荐 ${snapshot.recommendedCaptureFps} FPS`}
+              </span>
+            </div>
+            <div className="fps-options" role="radiogroup" aria-label="录制帧率">
+              {snapshot.supportedCaptureFps.map((fps) => (
+                <button
+                  key={fps}
+                  type="button"
+                  role="radio"
+                  aria-checked={draftFps === fps}
+                  className={draftFps === fps ? "fps-option selected" : "fps-option"}
+                  onClick={() => setDraftFps(fps)}
+                >
+                  <strong>{fps} FPS</strong>
+                  <small>{fps === snapshot.recommendedCaptureFps ? "当前屏幕推荐" : fps === 24 ? "较小文件" : fps === 30 ? "通用流畅" : "高流畅度"}</small>
+                </button>
+              ))}
+            </div>
+            {exceedsMonitorRefresh && (
+              <p className="fps-warning" role="status">该帧率高于当前屏幕刷新率，视频仍会按 {draftFps} FPS 输出，但可能包含重复帧并增加文件大小。</p>
+            )}
+            <footer>
+              <button disabled={savingSettings} onClick={() => setSettingsOpen(false)}>取消</button>
+              <button className="settings-save" disabled={savingSettings || draftFps === snapshot.captureFps} onClick={() => void saveSettings()}>
+                {savingSettings ? "保存中…" : "保存设置"}
+              </button>
+            </footer>
+          </section>
+        </div>
+      )}
     </main>
   );
 }

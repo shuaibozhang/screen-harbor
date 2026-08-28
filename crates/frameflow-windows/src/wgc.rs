@@ -59,6 +59,37 @@ pub struct WgcCaptureSession {
     worker: Option<JoinHandle<Result<(), PlatformError>>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mp4CaptureOptions {
+    frames_per_second: u32,
+}
+
+impl Mp4CaptureOptions {
+    pub fn new(frames_per_second: u32) -> Result<Self, PlatformError> {
+        if !(1..=240).contains(&frames_per_second) {
+            return Err(PlatformError::InvalidFrameRate(frames_per_second));
+        }
+        Ok(Self { frames_per_second })
+    }
+
+    pub fn frames_per_second(self) -> u32 {
+        self.frames_per_second
+    }
+}
+
+impl Default for Mp4CaptureOptions {
+    fn default() -> Self {
+        Self {
+            frames_per_second: 30,
+        }
+    }
+}
+
+struct Mp4Output {
+    path: PathBuf,
+    options: Mp4CaptureOptions,
+}
+
 impl WgcCaptureSession {
     fn control(&self, action: WorkerAction) -> Result<(), PlatformError> {
         let (acknowledge, receiver) = mpsc::sync_channel(1);
@@ -228,6 +259,7 @@ where
 pub fn start_region_mp4_capture<F>(
     selection: &RegionSelection,
     output_path: impl AsRef<Path>,
+    options: Mp4CaptureOptions,
     callback: F,
 ) -> Result<WgcCaptureSession, PlatformError>
 where
@@ -235,14 +267,17 @@ where
 {
     start_region_capture_internal(
         selection,
-        Some(output_path.as_ref().to_path_buf()),
+        Some(Mp4Output {
+            path: output_path.as_ref().to_path_buf(),
+            options,
+        }),
         callback,
     )
 }
 
 fn start_region_capture_internal<F>(
     selection: &RegionSelection,
-    output_path: Option<PathBuf>,
+    output: Option<Mp4Output>,
     callback: F,
 ) -> Result<WgcCaptureSession, PlatformError>
 where
@@ -256,7 +291,7 @@ where
         .spawn(move || {
             run_capture_worker(
                 selection,
-                output_path,
+                output,
                 callback,
                 control_receiver,
                 startup_sender,
@@ -285,7 +320,7 @@ where
 
 fn run_capture_worker<F>(
     selection: RegionSelection,
-    output_path: Option<PathBuf>,
+    output: Option<Mp4Output>,
     mut callback: F,
     control: mpsc::Receiver<WorkerControl>,
     startup: mpsc::SyncSender<Result<(), String>>,
@@ -325,16 +360,16 @@ where
             size,
         )?;
         let session = frame_pool.CreateCaptureSession(&item)?;
-        let writer = output_path
-            .as_deref()
-            .map(|path| {
+        let writer = output
+            .as_ref()
+            .map(|output| {
                 Mp4Writer::new(
-                    path,
+                    &output.path,
                     &device.d3d11,
                     &device.context,
                     selection.capture_rect.width,
                     selection.capture_rect.height,
-                    30,
+                    output.options.frames_per_second(),
                 )
             })
             .transpose()?;
@@ -365,7 +400,11 @@ where
     let started = Instant::now();
     let mut paused = false;
     let mut sequence = 0;
-    let mut output_clock = OutputClock::new(30);
+    let output_fps = output
+        .as_ref()
+        .map(|output| output.options.frames_per_second())
+        .unwrap_or(30);
+    let mut output_clock = OutputClock::new(output_fps);
     let mut latest_frame: Option<PreparedFrame> = None;
     let mut stopping = false;
     let mut fatal_media_error = None;
@@ -782,5 +821,33 @@ mod tests {
         let resumed = started + Duration::from_secs(10);
         clock.resume(resumed);
         assert!(clock.is_due(resumed));
+    }
+
+    #[test]
+    fn mp4_options_validate_the_public_frame_rate_boundary() {
+        for fps in [24, 30, 60] {
+            assert_eq!(
+                Mp4CaptureOptions::new(fps).unwrap().frames_per_second(),
+                fps
+            );
+        }
+        assert!(matches!(
+            Mp4CaptureOptions::new(0),
+            Err(PlatformError::InvalidFrameRate(0))
+        ));
+        assert!(matches!(
+            Mp4CaptureOptions::new(241),
+            Err(PlatformError::InvalidFrameRate(241))
+        ));
+    }
+
+    #[test]
+    fn output_clock_uses_the_configured_frame_rate() {
+        let started = Instant::now();
+        let mut clock = OutputClock::new(60);
+        clock.start(started);
+        clock.advance();
+        assert!(!clock.is_due(started + Duration::from_micros(16_665)));
+        assert!(clock.is_due(started + Duration::from_micros(16_667)));
     }
 }

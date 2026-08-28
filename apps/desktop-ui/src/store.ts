@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { beginSelection, getAppSnapshot } from "./bridge";
+import { beginSelection, getAppSnapshot, setCaptureFps } from "./bridge";
 import type { AppSnapshot } from "./domain";
 
 interface AppStore {
@@ -8,6 +8,7 @@ interface AppStore {
   error: string | null;
   hydrate: () => Promise<void>;
   startSelection: () => Promise<void>;
+  updateCaptureFps: (fps: number) => Promise<void>;
 }
 
 export const useAppStore = create<AppStore>((set) => ({
@@ -27,6 +28,15 @@ export const useAppStore = create<AppStore>((set) => ({
       await beginSelection();
     } catch {
       set({ error: "暂时无法进入框选，请稍后重试。" });
+    }
+  },
+  updateCaptureFps: async (fps) => {
+    try {
+      await setCaptureFps(fps);
+      set({ snapshot: await getAppSnapshot(), error: null });
+    } catch (cause) {
+      set({ error: `无法保存帧率设置：${String(cause)}` });
+      throw cause;
     }
   },
 }));
