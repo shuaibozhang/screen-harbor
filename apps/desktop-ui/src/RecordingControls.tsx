@@ -24,6 +24,7 @@ export function RecordingControls() {
     let disposed = false;
     let unlisten: (() => void) | undefined;
     let unlistenAudio: (() => void) | undefined;
+    let unlistenExitBlocked: (() => void) | undefined;
     void listen<RecordingState>("recording://state-changed", (event) => {
       setPhase(event.payload);
       if (event.payload === "recording") {
@@ -41,10 +42,17 @@ export function RecordingControls() {
       if (disposed) dispose();
       else unlistenAudio = dispose;
     });
+    void listen<string>("recording://exit-blocked", (event) => {
+      setError(event.payload);
+    }).then((dispose) => {
+      if (disposed) dispose();
+      else unlistenExitBlocked = dispose;
+    });
     return () => {
       disposed = true;
       unlisten?.();
       unlistenAudio?.();
+      unlistenExitBlocked?.();
     };
   }, []);
 

@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   ChevronDown,
@@ -26,6 +27,8 @@ export function App() {
   const [draftFps, setDraftFps] = useState(30);
   const [savingSettings, setSavingSettings] = useState(false);
   const [savingAudio, setSavingAudio] = useState<"microphone" | "systemAudio" | null>(null);
+  const [showAllRecordings, setShowAllRecordings] = useState(false);
+  const [openingRecording, setOpeningRecording] = useState<string | null>(null);
 
   useEffect(() => {
     void hydrate();
@@ -91,6 +94,23 @@ export function App() {
     }
   };
 
+  const openRecordingLocation = async (recordingId: string) => {
+    setOpeningRecording(recordingId);
+    try {
+      await invoke("open_recording_location", { recordingId });
+      setFinalizationError(null);
+    } catch (openError) {
+      setFinalizationError(String(openError));
+      await hydrate();
+    } finally {
+      setOpeningRecording(null);
+    }
+  };
+
+  const visibleRecordings = showAllRecordings
+    ? snapshot.recentRecordings
+    : snapshot.recentRecordings.slice(0, 3);
+
   return (
     <main className="shell">
       <header className="titlebar">
@@ -154,18 +174,19 @@ export function App() {
         </section>
 
         <section className="section recent" aria-labelledby="recent-heading">
-          <div className="section-heading"><h2 id="recent-heading">最近录制</h2>{snapshot.recentRecordings.length > 0 && <button>查看全部</button>}</div>
+          <div className="section-heading"><h2 id="recent-heading">最近录制</h2>{snapshot.recentRecordings.length > 3 && <button onClick={() => setShowAllRecordings((visible) => !visible)}>{showAllRecordings ? "收起" : "查看全部"}</button>}</div>
           {snapshot.recentRecordings.length === 0 ? (
             <div className="empty"><Clock3 size={20} /><span><strong>还没有录制</strong><small>完成的内容会出现在这里</small></span></div>
           ) : (
             <div className="rows recent-list">
-              {snapshot.recentRecordings.map((recording) => (
+              {visibleRecordings.map((recording) => (
                 <div className="row" key={recording.id}>
                   <span className="row-icon"><Video size={19} /></span>
                   <span className="row-copy">
                     <strong>{recording.name}</strong>
-                    <small>{recording.createdLabel} · {recording.durationSeconds} 秒 · MP4 已保存</small>
+                    <small>{recording.createdLabel} · {recording.durationSeconds !== undefined ? `${recording.durationSeconds} 秒` : "时长未知"} · MP4 已保存</small>
                   </span>
+                  <button className="recording-location" disabled={openingRecording !== null} onClick={() => void openRecordingLocation(recording.id)}>{openingRecording === recording.id ? "打开中…" : "打开位置"}</button>
                 </div>
               ))}
             </div>

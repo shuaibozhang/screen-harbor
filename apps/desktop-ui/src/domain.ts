@@ -15,7 +15,7 @@ export type OutputStatus = "pending" | "processing" | "completed" | "failed";
 export interface RecentRecording {
   id: string;
   name: string;
-  durationSeconds: number;
+  durationSeconds?: number;
   createdLabel: string;
   mainStatus: OutputStatus;
   previewStatus: OutputStatus;

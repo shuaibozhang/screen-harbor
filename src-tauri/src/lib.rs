@@ -1,6 +1,9 @@
+mod recording_index;
+
 use std::{
     fs,
     path::PathBuf,
+    process::Command,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc, Arc, Mutex,
@@ -11,14 +14,22 @@ use std::{
 
 use frameflow_capture::{CaptureSession, DisplayInfo, PhysicalRect, RegionSelection};
 use frameflow_core::{OutputConfig, RecordingAction, RecordingState, RecordingStateMachine};
+use recording_index::{RecordingIndex, RecordingSummary};
 use serde::{Deserialize, Serialize};
-use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, State};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Emitter, Manager, PhysicalPosition, PhysicalSize, State, WindowEvent,
+};
+
+const TRAY_SHOW_ID: &str = "show";
+const TRAY_QUIT_ID: &str = "quit";
 
 struct AppState {
     recording: Mutex<RecordingStateMachine>,
     selection: Mutex<Option<ActiveSelection>>,
     capture: Mutex<Option<ActiveCapture>>,
-    recent_recordings: Mutex<Vec<RecordingSummary>>,
+    recording_index: Mutex<Option<RecordingIndex>>,
     native_selection: Mutex<Option<frameflow_windows::NativeSelectionSession>>,
     output_config: Mutex<OutputConfig>,
     audio_config: Mutex<AudioInputConfig>,
@@ -159,29 +170,29 @@ struct AppSnapshot {
     recent_recordings: Vec<RecordingSummary>,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-#[derive(Clone)]
-struct RecordingSummary {
-    id: String,
-    name: String,
-    duration_seconds: u64,
-    created_label: String,
-    main_status: OutputStatus,
-    preview_status: OutputStatus,
-}
-
-#[derive(Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-#[allow(dead_code)]
-enum OutputStatus {
-    Pending,
-    Processing,
-    Completed,
-    Failed,
-}
-
 const SUPPORTED_CAPTURE_FPS: [u16; 3] = [24, 30, 60];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExitDecision {
+    Exit,
+    CancelThenExit,
+    Block,
+}
+
+fn exit_decision(state: RecordingState) -> ExitDecision {
+    match state {
+        RecordingState::Idle | RecordingState::Completed | RecordingState::Failed => {
+            ExitDecision::Exit
+        }
+        RecordingState::Selecting | RecordingState::Ready | RecordingState::Countdown => {
+            ExitDecision::CancelThenExit
+        }
+        RecordingState::Recording
+        | RecordingState::Paused
+        | RecordingState::Finalizing
+        | RecordingState::Processing => ExitDecision::Block,
+    }
+}
 
 fn recommended_capture_fps(refresh_rate_hz: Option<u32>) -> u16 {
     let Some(refresh_rate_hz) = refresh_rate_hz else {
@@ -231,10 +242,12 @@ fn get_app_snapshot(
 
     let save_directory = save_directory().to_string_lossy().into_owned();
     let recent_recordings = state
-        .recent_recordings
+        .recording_index
         .lock()
-        .map_err(|_| "recent recordings are unavailable".to_owned())?
-        .clone();
+        .map_err(|_| "recording index is unavailable".to_owned())?
+        .as_ref()
+        .ok_or_else(|| "recording index is not initialized".to_owned())?
+        .recent(usize::MAX)?;
     let capture_fps = state
         .output_config
         .lock()
@@ -325,6 +338,26 @@ fn set_audio_input(
         *config
     };
     save_audio_config(&app, next)
+}
+
+#[tauri::command]
+fn open_recording_location(state: State<'_, AppState>, recording_id: String) -> Result<(), String> {
+    let path = {
+        let index = state
+            .recording_index
+            .lock()
+            .map_err(|_| "recording index is unavailable".to_owned())?;
+        let index = index
+            .as_ref()
+            .ok_or_else(|| "recording index is not initialized".to_owned())?;
+        index.reconcile()?;
+        index.path_for_id(&recording_id)?
+    };
+    Command::new("explorer.exe")
+        .arg(format!("/select,{}", path.display()))
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("failed to open recording location: {error}"))
 }
 
 #[tauri::command]
@@ -1199,18 +1232,14 @@ fn complete_finalization(app: &tauri::AppHandle, result: Result<FinalizedCapture
                 .and_then(|name| name.to_str())
                 .unwrap_or("FrameFlow recording.mp4")
                 .to_owned();
-            if let (Ok(id), Ok(mut recent)) = (recording_id(), state.recent_recordings.lock()) {
-                recent.insert(
-                    0,
-                    RecordingSummary {
-                        id,
-                        name: file_name,
-                        duration_seconds: finalized.duration.as_secs(),
-                        created_label: "刚刚".to_owned(),
-                        main_status: OutputStatus::Completed,
-                        preview_status: OutputStatus::Pending,
-                    },
-                );
+            if let Ok(index) = state.recording_index.lock() {
+                if let Some(index) = index.as_ref() {
+                    if let Err(error) =
+                        index.record_completed(&finalized.output_path, finalized.duration)
+                    {
+                        eprintln!("failed to update recording index for {file_name}: {error}");
+                    }
+                }
             }
             if let Ok(mut recording) = state.recording.lock() {
                 if let Ok(processing) = recording.apply(RecordingAction::Finalized) {
@@ -1268,6 +1297,115 @@ fn restore_main_window(app: &tauri::AppHandle) -> Result<(), String> {
     controls.hide().map_err(|error| error.to_string())?;
     main.show().map_err(|error| error.to_string())?;
     main.set_focus().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn show_active_window(app: &tauri::AppHandle) -> Result<(), String> {
+    let state = app
+        .state::<AppState>()
+        .recording
+        .lock()
+        .map_err(|_| "recording state is unavailable".to_owned())?
+        .state();
+    let label = match state {
+        RecordingState::Recording
+        | RecordingState::Paused
+        | RecordingState::Finalizing
+        | RecordingState::Processing => "recording-controls",
+        RecordingState::Selecting | RecordingState::Ready | RecordingState::Countdown => {
+            "selection"
+        }
+        _ => "main",
+    };
+    let window = app
+        .get_webview_window(label)
+        .ok_or_else(|| format!("{label} window is unavailable"))?;
+    window.show().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())
+}
+
+fn cancel_pending_workflow_for_exit(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    if let Ok(mut native) = state.native_selection.lock() {
+        if let Some(session) = native.take() {
+            session.stop();
+        }
+    }
+    if let Ok(mut selection) = state.selection.lock() {
+        *selection = None;
+    }
+    if let Ok(mut recording) = state.recording.lock() {
+        let action = match recording.state() {
+            RecordingState::Selecting | RecordingState::Ready => {
+                Some(RecordingAction::CancelSelection)
+            }
+            RecordingState::Countdown => Some(RecordingAction::CancelCapture),
+            _ => None,
+        };
+        if let Some(action) = action {
+            let _ = recording.apply(action);
+        }
+    };
+}
+
+fn request_safe_exit(app: &tauri::AppHandle) {
+    let app_state = app.state::<AppState>();
+    let decision = app_state
+        .recording
+        .lock()
+        .map(|recording| exit_decision(recording.state()))
+        .map_err(|_| ());
+    match decision {
+        Ok(ExitDecision::Exit) => app.exit(0),
+        Ok(ExitDecision::CancelThenExit) => {
+            cancel_pending_workflow_for_exit(app);
+            app.exit(0);
+        }
+        Ok(ExitDecision::Block) => {
+            let message = "录制或保存尚未完成，请先点击“停止并保存”后再退出。";
+            let _ = app.emit("recording://exit-blocked", message);
+            let _ = show_active_window(app);
+        }
+        Err(_) => {
+            let _ = app.emit(
+                "recording://exit-blocked",
+                "录制状态暂时不可用，请稍后再试。",
+            );
+        }
+    }
+}
+
+fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
+    let show = MenuItem::with_id(app, TRAY_SHOW_ID, "显示 FrameFlow", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, TRAY_QUIT_ID, "退出", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &quit])?;
+    let mut builder = TrayIconBuilder::with_id("frameflow")
+        .tooltip("FrameFlow")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            TRAY_SHOW_ID => {
+                let _ = show_active_window(app);
+            }
+            TRAY_QUIT_ID => request_safe_exit(app),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if matches!(
+                event,
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                }
+            ) {
+                let _ = show_active_window(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+    builder.build(app)?;
     Ok(())
 }
 
@@ -1389,6 +1527,13 @@ fn audio_config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| error.to_string())
 }
 
+fn recording_index_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|directory| directory.join("recordings.sqlite3"))
+        .map_err(|error| error.to_string())
+}
+
 fn load_audio_config(app: &tauri::AppHandle) -> AudioInputConfig {
     audio_config_path(app)
         .and_then(|path| fs::read(path).map_err(|error| error.to_string()))
@@ -1419,7 +1564,7 @@ pub fn run() {
             recording: Mutex::new(RecordingStateMachine::default()),
             selection: Mutex::new(None),
             capture: Mutex::new(None),
-            recent_recordings: Mutex::new(Vec::new()),
+            recording_index: Mutex::new(None),
             native_selection: Mutex::new(None),
             output_config: Mutex::new(OutputConfig::default().normalized()),
             audio_config: Mutex::new(AudioInputConfig::default()),
@@ -1435,10 +1580,30 @@ pub fn run() {
                 .audio_config
                 .lock()
                 .expect("audio settings are unavailable") = audio_config;
+            let recording_index = RecordingIndex::open(
+                recording_index_path(app.handle()).map_err(std::io::Error::other)?,
+                save_directory(),
+            )
+            .map_err(std::io::Error::other)?;
+            recording_index.reconcile().map_err(std::io::Error::other)?;
+            *app.state::<AppState>()
+                .recording_index
+                .lock()
+                .expect("recording index is unavailable") = Some(recording_index);
+            setup_tray(app)?;
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                if window.label() == "main" {
+                    let _ = window.hide();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_app_snapshot,
+            open_recording_location,
             set_capture_fps,
             set_audio_input,
             begin_selection,
@@ -1484,5 +1649,39 @@ mod tests {
         assert_eq!(recommended_capture_fps(Some(59)), 60);
         assert_eq!(recommended_capture_fps(Some(60)), 60);
         assert_eq!(recommended_capture_fps(Some(144)), 60);
+    }
+
+    #[test]
+    fn exit_is_blocked_while_capture_or_finalization_owns_resources() {
+        for state in [
+            RecordingState::Recording,
+            RecordingState::Paused,
+            RecordingState::Finalizing,
+            RecordingState::Processing,
+        ] {
+            assert_eq!(exit_decision(state), ExitDecision::Block);
+        }
+    }
+
+    #[test]
+    fn exit_cancels_workflows_that_have_not_started_capture() {
+        for state in [
+            RecordingState::Selecting,
+            RecordingState::Ready,
+            RecordingState::Countdown,
+        ] {
+            assert_eq!(exit_decision(state), ExitDecision::CancelThenExit);
+        }
+    }
+
+    #[test]
+    fn idle_and_terminal_states_can_exit_immediately() {
+        for state in [
+            RecordingState::Idle,
+            RecordingState::Completed,
+            RecordingState::Failed,
+        ] {
+            assert_eq!(exit_decision(state), ExitDecision::Exit);
+        }
     }
 }
