@@ -45,6 +45,22 @@ export interface CaptureStats {
   elapsedMs: number;
   paused: boolean;
   lastError?: string;
+  audio?: {
+    microphone: LiveAudioInput;
+    systemAudio: LiveAudioInput;
+    warning?: string;
+  };
+}
+
+export interface LiveAudioInput {
+  enabled: boolean;
+  muted: boolean;
+  disconnected: boolean;
+}
+
+export interface AudioWarningEvent {
+  source: "microphone" | "systemAudio";
+  message: string;
 }
 
 export interface FinalizationEvent {

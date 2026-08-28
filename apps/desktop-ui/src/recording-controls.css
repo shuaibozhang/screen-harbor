@@ -40,5 +40,8 @@ html[data-window="recording-controls"] #root {
 .recording-controls-bar button { height: 30px; padding: 0 9px; border: 0; border-radius: 7px; color: #dce5f5; background: rgba(255,255,255,.07); cursor: pointer; font-size: 12px; }
 .recording-controls-bar button:hover { background: rgba(255,255,255,.13); }
 .recording-controls-bar button.finish { color: white; background: #d84d58; }
-.recording-controls-bar button:disabled { cursor: wait; opacity: .65; }
+.recording-controls-bar button.audio-control { padding: 0 7px; }
+.recording-controls-bar button.audio-control.muted { color: #ffbd73; background: rgba(255,174,78,.12); }
+.recording-controls-bar button:disabled { cursor: not-allowed; opacity: .65; }
 .recording-controls-error { position: absolute; right: 8px; bottom: 4px; left: 8px; overflow: hidden; color: #ffd7d9; font-size: 11px; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+.recording-controls-error.warning { color: #ffd393; }

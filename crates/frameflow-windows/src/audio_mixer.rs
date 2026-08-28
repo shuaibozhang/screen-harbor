@@ -408,6 +408,24 @@ mod tests {
     }
 
     #[test]
+    fn live_mute_keeps_the_source_timeline_running() {
+        let mut mixer = AudioMixer::new(system_only());
+        let first = mixer.push(AudioSourceId::System, chunk(0, 1_024, 0.3));
+        assert!(first[0].samples.iter().all(|sample| *sample == 0.3));
+
+        let mut control = mixer.source_control(AudioSourceId::System);
+        control.muted = true;
+        mixer.set_source_control(AudioSourceId::System, control);
+        let muted = mixer.push(AudioSourceId::System, chunk(213_333, 1_024, 0.3));
+        assert!(muted[0].samples.iter().all(|sample| *sample == 0.0));
+
+        control.muted = false;
+        mixer.set_source_control(AudioSourceId::System, control);
+        let restored = mixer.push(AudioSourceId::System, chunk(426_666, 1_024, 0.3));
+        assert!(restored[0].samples.iter().all(|sample| *sample == 0.3));
+    }
+
+    #[test]
     fn aligns_late_sources_on_the_qpc_timeline() {
         let mut mixer = AudioMixer::new(AudioMixerConfig {
             max_clock_correction_frames: 48_000,
