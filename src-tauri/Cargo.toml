@@ -1,0 +1,21 @@
+[package]
+name = "frameflow"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "frameflow_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+frameflow-capture = { path = "../crates/frameflow-capture" }
+frameflow-core = { path = "../crates/frameflow-core" }
+serde.workspace = true
+tauri = { version = "2", features = ["tray-icon"] }
+
+[target.'cfg(windows)'.dependencies]
+frameflow-windows = { path = "../crates/frameflow-windows" }

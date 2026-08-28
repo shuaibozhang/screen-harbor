@@ -1,0 +1,137 @@
+use frameflow_capture::{DisplayInfo, PhysicalRect};
+use windows::{
+    core::{Error as WindowsError, BOOL},
+    Win32::{
+        Foundation::{LPARAM, RECT},
+        Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO},
+        UI::{
+            HiDpi::{
+                AreDpiAwarenessContextsEqual, GetDpiForMonitor, GetThreadDpiAwarenessContext,
+                SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+                MDT_EFFECTIVE_DPI,
+            },
+            WindowsAndMessaging::MONITORINFOF_PRIMARY,
+        },
+    },
+};
+
+use crate::PlatformError;
+
+pub fn enable_per_monitor_v2_dpi() -> Result<(), PlatformError> {
+    let current = unsafe { GetThreadDpiAwarenessContext() };
+    if unsafe {
+        AreDpiAwarenessContextsEqual(current, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2).as_bool()
+    } {
+        return Ok(());
+    }
+
+    unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)? };
+    Ok(())
+}
+
+struct MonitorCollector {
+    displays: Vec<DisplayInfo>,
+    error: Option<windows::core::Error>,
+}
+
+pub fn list_displays() -> Result<Vec<DisplayInfo>, PlatformError> {
+    let mut collector = MonitorCollector {
+        displays: Vec::new(),
+        error: None,
+    };
+
+    let succeeded = unsafe {
+        EnumDisplayMonitors(
+            None,
+            None,
+            Some(collect_monitor),
+            LPARAM(&mut collector as *mut MonitorCollector as isize),
+        )
+    };
+    if !succeeded.as_bool() {
+        return Err(WindowsError::from_win32().into());
+    }
+
+    if let Some(error) = collector.error {
+        return Err(error.into());
+    }
+
+    Ok(collector.displays)
+}
+
+pub(crate) fn monitor_for_display_id(display_id: &str) -> Result<HMONITOR, PlatformError> {
+    let index = display_id
+        .strip_prefix("display-")
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or_else(|| PlatformError::DisplayNotFound(display_id.to_owned()))?;
+    let mut monitors = Vec::new();
+    let succeeded = unsafe {
+        EnumDisplayMonitors(
+            None,
+            None,
+            Some(collect_monitor_handle),
+            LPARAM(&mut monitors as *mut Vec<HMONITOR> as isize),
+        )
+    };
+    if !succeeded.as_bool() {
+        return Err(WindowsError::from_win32().into());
+    }
+    monitors
+        .get(index)
+        .copied()
+        .ok_or_else(|| PlatformError::DisplayNotFound(display_id.to_owned()))
+}
+
+unsafe extern "system" fn collect_monitor_handle(
+    monitor: HMONITOR,
+    _hdc: HDC,
+    _rect: *mut RECT,
+    context: LPARAM,
+) -> BOOL {
+    let monitors = unsafe { &mut *(context.0 as *mut Vec<HMONITOR>) };
+    monitors.push(monitor);
+    true.into()
+}
+
+unsafe extern "system" fn collect_monitor(
+    monitor: HMONITOR,
+    _hdc: HDC,
+    _rect: *mut RECT,
+    context: LPARAM,
+) -> BOOL {
+    let collector = unsafe { &mut *(context.0 as *mut MonitorCollector) };
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+
+    if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+        collector.error = Some(WindowsError::from_win32());
+        return false.into();
+    }
+
+    let bounds = info.rcMonitor;
+    let mut dpi_x = 0;
+    let mut dpi_y = 0;
+    if let Err(error) =
+        unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) }
+    {
+        collector.error = Some(error);
+        return false.into();
+    }
+    let index = collector.displays.len();
+    collector.displays.push(DisplayInfo {
+        id: format!("display-{index}"),
+        bounds: PhysicalRect {
+            x: bounds.left,
+            y: bounds.top,
+            width: (bounds.right - bounds.left).max(0) as u32,
+            height: (bounds.bottom - bounds.top).max(0) as u32,
+        },
+        primary: info.dwFlags & MONITORINFOF_PRIMARY == MONITORINFOF_PRIMARY,
+        dpi_x,
+        dpi_y,
+    });
+
+    true.into()
+}

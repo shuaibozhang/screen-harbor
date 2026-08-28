@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+
+# JavaScript / TypeScript build and test output
+dist/
+coverage/
+*.tsbuildinfo
+.vite/
+.turbo/
+playwright-report/
+test-results/
+
+# Rust / Tauri build output
+target/
+.codex-target/
+src-tauri/gen/
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.swp
+*~
+
+# IDE and OS metadata
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/frameflow-capture",
+  "crates/frameflow-core",
+  "crates/frameflow-windows",
+  "src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Proprietary"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"

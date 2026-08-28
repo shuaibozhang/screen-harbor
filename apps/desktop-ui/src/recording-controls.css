@@ -1,0 +1,44 @@
+html[data-window="recording-controls"],
+html[data-window="recording-controls"] body,
+html[data-window="recording-controls"] #root {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #151b28;
+}
+
+.recording-controls-shell {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  color: white;
+  user-select: none;
+}
+
+.recording-controls-bar {
+  box-sizing: border-box;
+  display: flex;
+  width: 100%;
+  height: 56px;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 6px 5px 12px;
+  border: 1px solid rgba(255,255,255,.12);
+  background: #151b28;
+  white-space: nowrap;
+}
+
+.recording-controls-bar span,
+.recording-controls-bar button { display: flex; align-items: center; gap: 6px; }
+.recording-controls-bar .recording-state { color: #ff9ba2; font-size: 12px; font-weight: 650; }
+.recording-controls-bar .recording-state i { width: 8px; height: 8px; border-radius: 50%; background: #ef5a64; box-shadow: 0 0 0 3px rgba(239,90,100,.16); }
+.recording-controls-bar strong { min-width: 42px; font-size: 13px; font-variant-numeric: tabular-nums; }
+.recording-controls-bar small { flex: 1; color: #9da8ba; font-size: 11px; }
+.recording-controls-bar button { height: 30px; padding: 0 9px; border: 0; border-radius: 7px; color: #dce5f5; background: rgba(255,255,255,.07); cursor: pointer; font-size: 12px; }
+.recording-controls-bar button:hover { background: rgba(255,255,255,.13); }
+.recording-controls-bar button.finish { color: white; background: #d84d58; }
+.recording-controls-bar button:disabled { cursor: wait; opacity: .65; }
+.recording-controls-error { position: absolute; right: 8px; bottom: 4px; left: 8px; overflow: hidden; color: #ffd7d9; font-size: 11px; text-align: center; text-overflow: ellipsis; white-space: nowrap; }

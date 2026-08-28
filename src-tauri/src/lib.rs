@@ -1,0 +1,845 @@
+use std::{
+    fs,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc, Arc, Mutex,
+    },
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+
+use frameflow_capture::{CaptureSession, DisplayInfo, PhysicalRect, RegionSelection};
+use frameflow_core::{RecordingAction, RecordingState, RecordingStateMachine};
+use serde::Serialize;
+use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, State};
+
+struct AppState {
+    recording: Mutex<RecordingStateMachine>,
+    selection: Mutex<Option<ActiveSelection>>,
+    capture: Mutex<Option<ActiveCapture>>,
+    recent_recordings: Mutex<Vec<RecordingSummary>>,
+    native_selection: Mutex<Option<frameflow_windows::NativeSelectionSession>>,
+}
+
+struct ActiveSelection {
+    display: DisplayInfo,
+    region: Option<RegionSelection>,
+}
+
+struct ActiveCapture {
+    session: frameflow_windows::WgcCaptureSession,
+    frame_count: Arc<AtomicU64>,
+    last_error: Arc<Mutex<Option<String>>>,
+    started_at: Instant,
+    paused_at: Option<Instant>,
+    paused_total: Duration,
+    temporary_path: PathBuf,
+    output_path: PathBuf,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CaptureStats {
+    frame_count: u64,
+    elapsed_ms: u128,
+    paused: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_error: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FinalizationEvent {
+    success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+struct FinalizedCapture {
+    output_path: PathBuf,
+    duration: Duration,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InputSnapshot {
+    enabled: bool,
+    available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device_name: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppSnapshot {
+    recording_state: RecordingState,
+    save_directory: String,
+    microphone: InputSnapshot,
+    system_audio: InputSnapshot,
+    output_summary: &'static str,
+    recent_recordings: Vec<RecordingSummary>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone)]
+struct RecordingSummary {
+    id: String,
+    name: String,
+    duration_seconds: u64,
+    created_label: String,
+    main_status: OutputStatus,
+    preview_status: OutputStatus,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+enum OutputStatus {
+    Pending,
+    Processing,
+    Completed,
+    Failed,
+}
+
+#[tauri::command]
+fn get_app_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
+    let recording_state = state
+        .recording
+        .lock()
+        .map_err(|_| "recording state is unavailable".to_owned())?
+        .state();
+
+    let save_directory = save_directory().to_string_lossy().into_owned();
+    let recent_recordings = state
+        .recent_recordings
+        .lock()
+        .map_err(|_| "recent recordings are unavailable".to_owned())?
+        .clone();
+
+    Ok(AppSnapshot {
+        recording_state,
+        save_directory,
+        microphone: InputSnapshot {
+            enabled: false,
+            available: false,
+            device_name: Some("尚未接入"),
+        },
+        system_audio: InputSnapshot {
+            enabled: false,
+            available: false,
+            device_name: None,
+        },
+        output_summary: "MP4 · H.264 · 当前无音频",
+        recent_recordings,
+    })
+}
+
+#[tauri::command]
+fn begin_selection(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<RecordingState, String> {
+    if state
+        .recording
+        .lock()
+        .map_err(|_| "recording state is unavailable".to_owned())?
+        .state()
+        != RecordingState::Idle
+    {
+        return Err("a recording workflow is already active".to_owned());
+    }
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window is unavailable".to_owned())?;
+    let overlay = app
+        .get_webview_window("selection")
+        .ok_or_else(|| "selection window is unavailable".to_owned())?;
+    let controls = app
+        .get_webview_window("recording-controls")
+        .ok_or_else(|| "recording controls window is unavailable".to_owned())?;
+    let monitor = main
+        .current_monitor()
+        .map_err(|error| error.to_string())?
+        .or_else(|| main.primary_monitor().ok().flatten())
+        .ok_or_else(|| "no active display is available".to_owned())?;
+
+    let position = *monitor.position();
+    let size = *monitor.size();
+    let display = frameflow_windows::list_displays()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|display| {
+            display.bounds.x == position.x
+                && display.bounds.y == position.y
+                && display.bounds.width == size.width
+                && display.bounds.height == size.height
+        })
+        .ok_or_else(|| "active display geometry is unavailable".to_owned())?;
+
+    overlay.hide().map_err(|error| error.to_string())?;
+    controls.hide().map_err(|error| error.to_string())?;
+    main.hide().map_err(|error| error.to_string())?;
+
+    let next_state = state
+        .recording
+        .lock()
+        .map_err(|_| "recording state is unavailable".to_owned())?
+        .apply(RecordingAction::BeginSelection)
+        .map_err(|error| error.to_string())?;
+
+    *state
+        .selection
+        .lock()
+        .map_err(|_| "selection state is unavailable".to_owned())? = Some(ActiveSelection {
+        display: display.clone(),
+        region: None,
+    });
+
+    let callback_app = app.clone();
+    let native =
+        match frameflow_windows::start_native_selection(display.bounds, move |relative_rect| {
+            native_selection_finished(&callback_app, relative_rect)
+        }) {
+            Ok(native) => native,
+            Err(error) => {
+                if let Ok(mut recording) = state.recording.lock() {
+                    let _ = recording.apply(RecordingAction::CancelSelection);
+                }
+                if let Ok(mut selection) = state.selection.lock() {
+                    *selection = None;
+                }
+                let _ = restore_main_window(&app);
+                return Err(error.to_string());
+            }
+        };
+    *state
+        .native_selection
+        .lock()
+        .map_err(|_| "native selection state is unavailable".to_owned())? = Some(native);
+
+    app.emit("recording://state-changed", next_state)
+        .map_err(|error| error.to_string())?;
+
+    Ok(next_state)
+}
+
+#[tauri::command]
+fn get_current_selection(state: State<'_, AppState>) -> Result<Option<RegionSelection>, String> {
+    Ok(state
+        .selection
+        .lock()
+        .map_err(|_| "selection state is unavailable".to_owned())?
+        .as_ref()
+        .and_then(|active| active.region.clone()))
+}
+
+#[tauri::command]
+fn redraw_selection(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    if state
+        .recording
+        .lock()
+        .map_err(|_| "recording state is unavailable".to_owned())?
+        .state()
+        != RecordingState::Ready
+    {
+        return Err("selection can only be redrawn while ready".to_owned());
+    }
+    if let Some(native) = state
+        .native_selection
+        .lock()
+        .map_err(|_| "native selection state is unavailable".to_owned())?
+        .take()
+    {
+        native.stop();
+    }
+    let bounds = {
+        let mut selection = state
+            .selection
+            .lock()
+            .map_err(|_| "selection state is unavailable".to_owned())?;
+        let active = selection
+            .as_mut()
+            .ok_or_else(|| "selection has not started".to_owned())?;
+        active.region = None;
+        active.display.bounds
+    };
+    if let Some(toolbar) = app.get_webview_window("selection") {
+        toolbar.hide().map_err(|error| error.to_string())?;
+    }
+    let callback_app = app.clone();
+    let native = frameflow_windows::start_native_selection(bounds, move |relative_rect| {
+        native_selection_finished(&callback_app, relative_rect)
+    })
+    .map_err(|error| error.to_string())?;
+    *state
+        .native_selection
+        .lock()
+        .map_err(|_| "native selection state is unavailable".to_owned())? = Some(native);
+    Ok(())
+}
+
+fn native_selection_finished(app: &tauri::AppHandle, relative_rect: Option<PhysicalRect>) {
+    let state = app.state::<AppState>();
+    let Some(relative_rect) = relative_rect else {
+        if let Ok(mut recording) = state.recording.lock() {
+            let _ = recording.apply(RecordingAction::CancelSelection);
+        }
+        if let Ok(mut selection) = state.selection.lock() {
+            *selection = None;
+        }
+        let _ = restore_main_window(app);
+        let _ = app.emit("recording://state-changed", RecordingState::Idle);
+        return;
+    };
+    let (region, first_confirmation) = {
+        let mut selection = match state.selection.lock() {
+            Ok(selection) => selection,
+            Err(_) => return,
+        };
+        let active = match selection.as_mut() {
+            Some(active) => active,
+            None => return,
+        };
+        let mut capture_rect = relative_rect;
+        capture_rect.width &= !1;
+        capture_rect.height &= !1;
+        let region = match RegionSelection::from_display_physical(&active.display, capture_rect) {
+            Ok(region) => region,
+            Err(_) => return,
+        };
+        let first_confirmation = active.region.is_none();
+        active.region = Some(region.clone());
+        (region, first_confirmation)
+    };
+
+    let ready = {
+        let mut recording = match state.recording.lock() {
+            Ok(recording) => recording,
+            Err(_) => return,
+        };
+        match recording.state() {
+            RecordingState::Selecting => match recording.apply(RecordingAction::ConfirmSelection) {
+                Ok(ready) => ready,
+                Err(_) => return,
+            },
+            RecordingState::Ready => RecordingState::Ready,
+            _ => return,
+        }
+    };
+    if let Some(toolbar) = app.get_webview_window("selection") {
+        let _ = position_capture_toolbar(&toolbar, &region);
+        if first_confirmation {
+            let _ = toolbar.show();
+            let _ = toolbar.set_focus();
+        }
+    }
+    let _ = app.emit("selection://confirmed", region);
+    let _ = app.emit("recording://state-changed", ready);
+}
+
+#[tauri::command]
+fn cancel_selection(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<RecordingState, String> {
+    let next_state = state
+        .recording
+        .lock()
+        .map_err(|_| "recording state is unavailable".to_owned())?
+        .apply(RecordingAction::CancelSelection)
+        .map_err(|error| error.to_string())?;
+    *state
+        .selection
+        .lock()
+        .map_err(|_| "selection state is unavailable".to_owned())? = None;
+    if let Some(native) = state
+        .native_selection
+        .lock()
+        .map_err(|_| "native selection state is unavailable".to_owned())?
+        .take()
+    {
+        native.stop();
+    }
+    restore_main_window(&app)?;
+    app.emit("recording://state-changed", next_state)
+        .map_err(|error| error.to_string())?;
+    Ok(next_state)
+}
+
+#[tauri::command]
+fn start_countdown(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<RecordingState, String> {
+    let next_state = state
+        .recording
+        .lock()
+        .map_err(|_| "recording state is unavailable".to_owned())?
+        .apply(RecordingAction::StartCountdown)
+        .map_err(|error| error.to_string())?;
+    app.emit("recording://state-changed", next_state)
+        .map_err(|error| error.to_string())?;
+    Ok(next_state)
+}
+
+#[tauri::command]
+fn cancel_countdown(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<RecordingState, String> {
+    let next_state = state
+        .recording
+        .lock()
+        .map_err(|_| "recording state is unavailable".to_owned())?
+        .apply(RecordingAction::CancelCapture)
+        .map_err(|error| error.to_string())?;
+    *state
+        .selection
+        .lock()
+        .map_err(|_| "selection state is unavailable".to_owned())? = None;
+    if let Some(native) = state
+        .native_selection
+        .lock()
+        .map_err(|_| "native selection state is unavailable".to_owned())?
+        .take()
+    {
+        native.stop();
+    }
+    restore_main_window(&app)?;
+    app.emit("recording://state-changed", next_state)
+        .map_err(|error| error.to_string())?;
+    Ok(next_state)
+}
+
+#[tauri::command]
+fn start_capture(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<RecordingState, String> {
+    let selection = state
+        .selection
+        .lock()
+        .map_err(|_| "selection state is unavailable".to_owned())?
+        .as_ref()
+        .and_then(|selection| selection.region.clone())
+        .ok_or_else(|| "capture region is unavailable".to_owned())?;
+    if state
+        .recording
+        .lock()
+        .map_err(|_| "recording state is unavailable".to_owned())?
+        .state()
+        != RecordingState::Countdown
+    {
+        return Err("capture is not waiting for countdown".to_owned());
+    }
+
+    let overlay = app
+        .get_webview_window("selection")
+        .ok_or_else(|| "selection window is unavailable".to_owned())?;
+    let controls = app
+        .get_webview_window("recording-controls")
+        .ok_or_else(|| "recording controls window is unavailable".to_owned())?;
+    position_capture_toolbar(&controls, &selection)?;
+    #[cfg(target_os = "windows")]
+    {
+        let hwnd = controls.hwnd().map_err(|error| error.to_string())?;
+        frameflow_windows::exclude_window_from_capture(hwnd.0 as isize)
+            .map_err(|error| error.to_string())?;
+    }
+
+    if let Some(native) = state
+        .native_selection
+        .lock()
+        .map_err(|_| "native selection state is unavailable".to_owned())?
+        .as_ref()
+    {
+        native.lock().map_err(|error| error.to_string())?;
+    }
+
+    // Commit removal of the selection toolbar before WGC observes the desktop.
+    // The native border remains visible but is click-through and excluded from capture.
+    overlay.hide().map_err(|error| error.to_string())?;
+    frameflow_windows::flush_desktop_compositor().map_err(|error| error.to_string())?;
+
+    let (temporary_path, output_path) = allocate_recording_paths()?;
+    let frame_count = Arc::new(AtomicU64::new(0));
+    let last_error = Arc::new(Mutex::new(None));
+    let session = frameflow_windows::start_region_mp4_capture(&selection, &temporary_path, {
+        let frame_count = Arc::clone(&frame_count);
+        let last_error = Arc::clone(&last_error);
+        move |result| match result {
+            Ok(frame) => frame_count.store(frame.sequence, Ordering::Release),
+            Err(error) => {
+                if let Ok(mut last_error) = last_error.lock() {
+                    *last_error = Some(error.to_string());
+                }
+            }
+        }
+    })
+    .map_err(|error| error.to_string())?;
+
+    let next_state = state
+        .recording
+        .lock()
+        .map_err(|_| "recording state is unavailable".to_owned())?
+        .apply(RecordingAction::CountdownFinished)
+        .map_err(|error| error.to_string())?;
+    *state
+        .capture
+        .lock()
+        .map_err(|_| "capture state is unavailable".to_owned())? = Some(ActiveCapture {
+        session,
+        frame_count,
+        last_error,
+        started_at: Instant::now(),
+        paused_at: None,
+        paused_total: Duration::ZERO,
+        temporary_path,
+        output_path,
+    });
+    controls.show().map_err(|error| error.to_string())?;
+    app.emit("recording://state-changed", next_state)
+        .map_err(|error| error.to_string())?;
+    Ok(next_state)
+}
+
+#[tauri::command]
+fn pause_capture(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<RecordingState, String> {
+    let mut capture = state
+        .capture
+        .lock()
+        .map_err(|_| "capture state is unavailable".to_owned())?;
+    let active = capture
+        .as_mut()
+        .ok_or_else(|| "capture session is unavailable".to_owned())?;
+    active.session.pause().map_err(|error| error.to_string())?;
+    active.paused_at = Some(Instant::now());
+    let next_state = state
+        .recording
+        .lock()
+        .map_err(|_| "recording state is unavailable".to_owned())?
+        .apply(RecordingAction::Pause)
+        .map_err(|error| error.to_string())?;
+    app.emit("recording://state-changed", next_state)
+        .map_err(|error| error.to_string())?;
+    Ok(next_state)
+}
+
+#[tauri::command]
+fn resume_capture(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<RecordingState, String> {
+    let mut capture = state
+        .capture
+        .lock()
+        .map_err(|_| "capture state is unavailable".to_owned())?;
+    let active = capture
+        .as_mut()
+        .ok_or_else(|| "capture session is unavailable".to_owned())?;
+    active.session.resume().map_err(|error| error.to_string())?;
+    if let Some(paused_at) = active.paused_at.take() {
+        active.paused_total += paused_at.elapsed();
+    }
+    let next_state = state
+        .recording
+        .lock()
+        .map_err(|_| "recording state is unavailable".to_owned())?
+        .apply(RecordingAction::Resume)
+        .map_err(|error| error.to_string())?;
+    app.emit("recording://state-changed", next_state)
+        .map_err(|error| error.to_string())?;
+    Ok(next_state)
+}
+
+#[tauri::command]
+fn get_capture_stats(state: State<'_, AppState>) -> Result<CaptureStats, String> {
+    let capture = state
+        .capture
+        .lock()
+        .map_err(|_| "capture state is unavailable".to_owned())?;
+    let active = capture
+        .as_ref()
+        .ok_or_else(|| "capture session is unavailable".to_owned())?;
+    let clock_end = active.paused_at.unwrap_or_else(Instant::now);
+    let elapsed = clock_end
+        .duration_since(active.started_at)
+        .saturating_sub(active.paused_total);
+    let last_error = active
+        .last_error
+        .lock()
+        .map_err(|_| "capture error state is unavailable".to_owned())?
+        .clone();
+    Ok(CaptureStats {
+        frame_count: active.frame_count.load(Ordering::Acquire),
+        elapsed_ms: elapsed.as_millis(),
+        paused: active.paused_at.is_some(),
+        last_error,
+    })
+}
+
+#[tauri::command]
+fn request_stop_capture(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<RecordingState, String> {
+    let active = state
+        .capture
+        .lock()
+        .map_err(|_| "capture state is unavailable".to_owned())?
+        .take()
+        .ok_or_else(|| "capture session is unavailable".to_owned())?;
+    let finalizing = state
+        .recording
+        .lock()
+        .map_err(|_| "recording state is unavailable".to_owned())?
+        .apply(RecordingAction::Stop)
+        .map_err(|error| error.to_string())?;
+    app.emit("recording://state-changed", finalizing)
+        .map_err(|error| error.to_string())?;
+    spawn_capture_finalizer(app, active);
+    Ok(finalizing)
+}
+
+fn spawn_capture_finalizer(app: tauri::AppHandle, active: ActiveCapture) {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("frameflow-mp4-finalize".to_owned())
+        .spawn(move || {
+            let _ = sender.send(finalize_active_capture(active));
+        })
+        .expect("failed to start MP4 finalizer");
+
+    thread::Builder::new()
+        .name("frameflow-finalize-coordinator".to_owned())
+        .spawn(move || {
+            let result = match receiver.recv_timeout(Duration::from_secs(20)) {
+                Ok(result) => result,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    Err("MP4 收尾超过 20 秒，已解除界面锁定；未完成文件保留为 .part".to_owned())
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => Err("MP4 收尾线程意外退出".to_owned()),
+            };
+            complete_finalization(&app, result);
+        })
+        .expect("failed to start finalization coordinator");
+}
+
+fn finalize_active_capture(active: ActiveCapture) -> Result<FinalizedCapture, String> {
+    let ActiveCapture {
+        session,
+        started_at,
+        paused_at,
+        paused_total,
+        temporary_path,
+        output_path,
+        ..
+    } = active;
+    let clock_end = paused_at.unwrap_or_else(Instant::now);
+    let duration = clock_end
+        .duration_since(started_at)
+        .saturating_sub(paused_total);
+    session.stop().map_err(|error| error.to_string())?;
+    fs::rename(&temporary_path, &output_path)
+        .map_err(|error| format!("failed to finalize recording file: {error}"))?;
+    Ok(FinalizedCapture {
+        output_path,
+        duration,
+    })
+}
+
+fn complete_finalization(app: &tauri::AppHandle, result: Result<FinalizedCapture, String>) {
+    let state = app.state::<AppState>();
+    let event = match result {
+        Ok(finalized) => {
+            let file_name = finalized
+                .output_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("FrameFlow recording.mp4")
+                .to_owned();
+            if let (Ok(id), Ok(mut recent)) = (recording_id(), state.recent_recordings.lock()) {
+                recent.insert(
+                    0,
+                    RecordingSummary {
+                        id,
+                        name: file_name,
+                        duration_seconds: finalized.duration.as_secs(),
+                        created_label: "刚刚".to_owned(),
+                        main_status: OutputStatus::Completed,
+                        preview_status: OutputStatus::Pending,
+                    },
+                );
+            }
+            if let Ok(mut recording) = state.recording.lock() {
+                if let Ok(processing) = recording.apply(RecordingAction::Finalized) {
+                    let _ = app.emit("recording://state-changed", processing);
+                }
+                if let Ok(completed) = recording.apply(RecordingAction::ProcessingCompleted) {
+                    let _ = app.emit("recording://state-changed", completed);
+                }
+                let _ = recording.apply(RecordingAction::Reset);
+            }
+            FinalizationEvent {
+                success: true,
+                output_path: Some(finalized.output_path.to_string_lossy().into_owned()),
+                error: None,
+            }
+        }
+        Err(error) => {
+            if let Ok(mut recording) = state.recording.lock() {
+                if let Ok(failed) = recording.apply(RecordingAction::Fail) {
+                    let _ = app.emit("recording://state-changed", failed);
+                }
+                let _ = recording.apply(RecordingAction::Reset);
+            }
+            FinalizationEvent {
+                success: false,
+                output_path: None,
+                error: Some(error),
+            }
+        }
+    };
+    if let Ok(mut selection) = state.selection.lock() {
+        *selection = None;
+    }
+    if let Ok(mut native) = state.native_selection.lock() {
+        if let Some(session) = native.take() {
+            session.stop();
+        }
+    }
+    let _ = restore_main_window(app);
+    let _ = app.emit("recording://finalized", event);
+    let _ = app.emit("recording://state-changed", RecordingState::Idle);
+}
+
+fn restore_main_window(app: &tauri::AppHandle) -> Result<(), String> {
+    let overlay = app
+        .get_webview_window("selection")
+        .ok_or_else(|| "selection window is unavailable".to_owned())?;
+    let controls = app
+        .get_webview_window("recording-controls")
+        .ok_or_else(|| "recording controls window is unavailable".to_owned())?;
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window is unavailable".to_owned())?;
+    overlay.hide().map_err(|error| error.to_string())?;
+    controls.hide().map_err(|error| error.to_string())?;
+    main.show().map_err(|error| error.to_string())?;
+    main.set_focus().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn position_capture_toolbar(
+    controls: &tauri::WebviewWindow,
+    selection: &RegionSelection,
+) -> Result<(), String> {
+    const LOGICAL_WIDTH: u32 = 520;
+    const LOGICAL_HEIGHT: u32 = 56;
+    const LOGICAL_GAP: i32 = 12;
+
+    let monitor = controls
+        .monitor_from_point(
+            f64::from(selection.desktop_rect.x),
+            f64::from(selection.desktop_rect.y),
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "selection display is unavailable".to_owned())?;
+    let scale = monitor.scale_factor();
+    let monitor_position = *monitor.position();
+    let monitor_size = *monitor.size();
+    let width = (f64::from(LOGICAL_WIDTH) * scale).round() as u32;
+    let height = (f64::from(LOGICAL_HEIGHT) * scale).round() as u32;
+    let gap = (f64::from(LOGICAL_GAP) * scale).round() as i32;
+
+    let monitor_right = monitor_position.x + monitor_size.width as i32;
+    let monitor_bottom = monitor_position.y + monitor_size.height as i32;
+    let centered_x =
+        selection.desktop_rect.x + (selection.desktop_rect.width as i32 - width as i32) / 2;
+    let x = centered_x.clamp(monitor_position.x, monitor_right - width as i32);
+    let above = selection.desktop_rect.y - height as i32 - gap;
+    let below = selection.desktop_rect.y + selection.desktop_rect.height as i32 + gap;
+    let y = if above >= monitor_position.y {
+        above
+    } else if below + height as i32 <= monitor_bottom {
+        below
+    } else {
+        monitor_position.y.max(selection.desktop_rect.y + gap)
+    };
+
+    let current_size = controls.outer_size().map_err(|error| error.to_string())?;
+    if current_size.width != width || current_size.height != height {
+        controls
+            .set_size(PhysicalSize::new(width, height))
+            .map_err(|error| error.to_string())?;
+    }
+    controls
+        .set_position(PhysicalPosition::new(x, y))
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn save_directory() -> PathBuf {
+    std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .map(|profile| profile.join("Videos").join("FrameFlow"))
+        .unwrap_or_else(|| PathBuf::from(r"C:\Users\Public\Videos\FrameFlow"))
+}
+
+fn recording_id() -> Result<String, String> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().to_string())
+        .map_err(|error| format!("system clock is unavailable: {error}"))
+}
+
+fn allocate_recording_paths() -> Result<(PathBuf, PathBuf), String> {
+    let directory = save_directory();
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("failed to create recording directory: {error}"))?;
+    let id = recording_id()?;
+    let base = format!("FrameFlow-{id}");
+    Ok((
+        directory.join(format!("{base}.mp4.part")),
+        directory.join(format!("{base}.mp4")),
+    ))
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    #[cfg(target_os = "windows")]
+    frameflow_windows::enable_per_monitor_v2_dpi()
+        .expect("failed to enable Per-Monitor V2 DPI awareness");
+
+    tauri::Builder::default()
+        .manage(AppState {
+            recording: Mutex::new(RecordingStateMachine::default()),
+            selection: Mutex::new(None),
+            capture: Mutex::new(None),
+            recent_recordings: Mutex::new(Vec::new()),
+            native_selection: Mutex::new(None),
+        })
+        .invoke_handler(tauri::generate_handler![
+            get_app_snapshot,
+            begin_selection,
+            get_current_selection,
+            redraw_selection,
+            cancel_selection,
+            start_countdown,
+            cancel_countdown,
+            start_capture,
+            pause_capture,
+            resume_capture,
+            get_capture_stats,
+            request_stop_capture
+        ])
+        .run(tauri::generate_context!())
+        .expect("failed to run FrameFlow");
+}
