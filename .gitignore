@@ -31,6 +31,8 @@ __pycache__/
 *.temp
 *.swp
 *~
+/h264-probe*.mp4
+/frameflow-h264-probe.mp4
 
 # IDE and OS metadata
 .idea/
