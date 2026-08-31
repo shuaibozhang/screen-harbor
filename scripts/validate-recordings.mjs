@@ -18,7 +18,11 @@ export function validateProbe(probe, options = {}) {
   const streams = Array.isArray(probe?.streams) ? probe.streams : [];
   const video = streams.find((stream) => stream.codec_type === "video");
   const audio = streams.find((stream) => stream.codec_type === "audio");
+  const audioPackets = Array.isArray(probe?.audioPackets) ? probe.audioPackets : undefined;
   const duration = Number(format.duration ?? video?.duration);
+  let maximumAudioPacketDurationMs;
+  let maximumAudioGapMs;
+  let audioVideoDriftMs;
 
   if (!video) {
     failures.push("缺少视频轨");
@@ -28,10 +32,21 @@ export function validateProbe(probe, options = {}) {
     if (options.height && Number(video.height) !== options.height) failures.push(`高度为 ${video.height}，期望 ${options.height} 物理像素`);
 
     const frameRate = parseRate(video.avg_frame_rate);
+    const nominalFrameRate = parseRate(video.r_frame_rate);
     if (!Number.isFinite(frameRate) || frameRate <= 0) {
       failures.push("无法读取有效平均帧率");
-    } else if (options.fps && Math.abs(frameRate - options.fps) > (options.fpsTolerance ?? 0.05)) {
-      failures.push(`平均帧率为 ${frameRate.toFixed(3)} FPS，期望 ${options.fps} FPS`);
+    }
+    if (options.fps) {
+      const tolerance = options.fpsTolerance ?? 0.05;
+      const maximumDropRatio = options.maximumFrameDropRatio ?? 0.01;
+      if (!Number.isFinite(nominalFrameRate) || Math.abs(nominalFrameRate - options.fps) > tolerance) {
+        failures.push(`标称帧率为 ${nominalFrameRate.toFixed(3)} FPS，期望 ${options.fps} FPS`);
+      } else if (
+        Number.isFinite(frameRate)
+        && (frameRate < options.fps * (1 - maximumDropRatio) || frameRate > options.fps + tolerance)
+      ) {
+        failures.push(`平均帧率为 ${frameRate.toFixed(3)} FPS，超出目标 ${options.fps} FPS 的允许丢帧范围`);
+      }
     }
   }
 
@@ -50,6 +65,42 @@ export function validateProbe(probe, options = {}) {
     if (audio.codec_name !== "aac") failures.push(`音频编码为 ${audio.codec_name ?? "未知"}，期望 aac`);
     if (Number(audio.sample_rate) !== 48_000) failures.push(`音频采样率为 ${audio.sample_rate ?? "未知"} Hz，期望 48000 Hz`);
     if (Number(audio.channels) !== 2) failures.push(`音频声道数为 ${audio.channels ?? "未知"}，期望 2`);
+    if (audioPackets) {
+      if (audioPackets.length === 0) {
+        failures.push("音轨不包含可读取的 AAC 数据包");
+      } else {
+        let maximumDuration = 0;
+        let maximumGap = 0;
+        let previousEnd;
+        for (const packet of audioPackets) {
+          const pts = Number(packet.pts_time);
+          const packetDuration = Number(packet.duration_time);
+          if (!Number.isFinite(pts) || !Number.isFinite(packetDuration) || packetDuration <= 0) {
+            failures.push("音轨包含无效的数据包时间戳");
+            break;
+          }
+          maximumDuration = Math.max(maximumDuration, packetDuration);
+          if (previousEnd !== undefined) maximumGap = Math.max(maximumGap, Math.abs(pts - previousEnd));
+          previousEnd = pts + packetDuration;
+        }
+        maximumAudioPacketDurationMs = maximumDuration * 1_000;
+        maximumAudioGapMs = maximumGap * 1_000;
+        if (maximumAudioPacketDurationMs > (options.maximumAudioPacketDurationMs ?? 30)) {
+          failures.push(`最长 AAC 包为 ${maximumAudioPacketDurationMs.toFixed(3)} ms，音频时间轴可能稀疏`);
+        }
+        if (maximumAudioGapMs > (options.maximumAudioGapMs ?? 1)) {
+          failures.push(`AAC 包之间最大时间戳间隔为 ${maximumAudioGapMs.toFixed(3)} ms`);
+        }
+      }
+    }
+    const videoDuration = Number(video?.duration ?? duration);
+    const audioDuration = Number(audio.duration);
+    if (Number.isFinite(videoDuration) && Number.isFinite(audioDuration)) {
+      audioVideoDriftMs = Math.abs(videoDuration - audioDuration) * 1_000;
+      if (audioVideoDriftMs > (options.maximumAudioVideoDriftMs ?? 250)) {
+        failures.push(`音视频轨时长相差 ${audioVideoDriftMs.toFixed(3)} ms`);
+      }
+    }
   }
 
   return {
@@ -60,10 +111,15 @@ export function validateProbe(probe, options = {}) {
       width: Number(video?.width),
       height: Number(video?.height),
       fps: parseRate(video?.avg_frame_rate),
+      nominalFps: parseRate(video?.r_frame_rate),
       videoCodec: video?.codec_name,
       audioCodec: audio?.codec_name,
       audioSampleRate: audio ? Number(audio.sample_rate) : undefined,
       audioChannels: audio ? Number(audio.channels) : undefined,
+      audioPacketCount: audioPackets?.length,
+      maximumAudioPacketDurationMs,
+      maximumAudioGapMs,
+      audioVideoDriftMs,
     },
   };
 }
@@ -75,7 +131,16 @@ function parsePositiveNumber(value, option) {
 }
 
 export function parseArguments(argv) {
-  const options = { audio: "optional", latest: 2, fpsTolerance: 0.05, durationTolerance: 1 };
+  const options = {
+    audio: "optional",
+    latest: 2,
+    fpsTolerance: 0.05,
+    maximumFrameDropRatio: 0.01,
+    durationTolerance: 1,
+    maximumAudioPacketDurationMs: 30,
+    maximumAudioGapMs: 1,
+    maximumAudioVideoDriftMs: 250,
+  };
   const files = [];
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -95,8 +160,12 @@ export function parseArguments(argv) {
       options.height = Number(match[2]);
     } else if (argument === "--expected-fps") options.fps = parsePositiveNumber(next(), argument);
     else if (argument === "--fps-tolerance") options.fpsTolerance = parsePositiveNumber(next(), argument);
+    else if (argument === "--max-frame-drop-percent") options.maximumFrameDropRatio = parsePositiveNumber(next(), argument) / 100;
     else if (argument === "--expected-duration") options.duration = parsePositiveNumber(next(), argument);
     else if (argument === "--duration-tolerance") options.durationTolerance = parsePositiveNumber(next(), argument);
+    else if (argument === "--max-audio-packet-ms") options.maximumAudioPacketDurationMs = parsePositiveNumber(next(), argument);
+    else if (argument === "--max-audio-gap-ms") options.maximumAudioGapMs = parsePositiveNumber(next(), argument);
+    else if (argument === "--max-av-drift-ms") options.maximumAudioVideoDriftMs = parsePositiveNumber(next(), argument);
     else if (argument === "--audio") {
       options.audio = next();
       if (!["required", "optional", "forbidden"].includes(options.audio)) {
@@ -133,12 +202,21 @@ export function resolveInputFiles(files, options) {
 }
 
 function probeFile(path, ffprobe) {
-  const output = execFileSync(
+  const metadataOutput = execFileSync(
     ffprobe,
-    ["-v", "error", "-show_entries", "format=duration,format_name:stream=codec_type,codec_name,width,height,avg_frame_rate,duration,sample_rate,channels", "-of", "json", path],
+    ["-v", "error", "-show_entries", "format=duration,format_name:stream=codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate,duration,sample_rate,channels", "-of", "json", path],
     { encoding: "utf8", windowsHide: true },
   );
-  return JSON.parse(output);
+  const probe = JSON.parse(metadataOutput);
+  if (probe.streams?.some((stream) => stream.codec_type === "audio")) {
+    const packetOutput = execFileSync(
+      ffprobe,
+      ["-v", "error", "-select_streams", "a:0", "-show_packets", "-show_entries", "packet=pts_time,duration_time", "-of", "json", path],
+      { encoding: "utf8", windowsHide: true },
+    );
+    probe.audioPackets = JSON.parse(packetOutput).packets ?? [];
+  }
+  return probe;
 }
 
 function usage() {
@@ -150,8 +228,12 @@ function usage() {
   --latest N                   自动选择最近 N 段，默认 2
   --expected-size 1920x1080    期望物理像素尺寸
   --expected-fps 30            期望平均帧率
+  --max-frame-drop-percent 1   平均帧率允许的最大实时丢帧比例
   --expected-duration 10       期望时长（秒）
   --duration-tolerance 1       时长允许误差（秒）
+  --max-audio-packet-ms 30     允许的最长 AAC 包时长
+  --max-audio-gap-ms 1         AAC 包时间戳允许的最大间隔
+  --max-av-drift-ms 250        音视频轨允许的最大时长差
   --audio required|optional|forbidden
   --ffprobe PATH               指定 ffprobe.exe 路径`;
 }
@@ -186,6 +268,9 @@ function main(argv) {
         : "无音轨";
       console.log(`${result.ok ? "通过" : "失败"} ${path}`);
       console.log(`  ${summary.width}x${summary.height} · ${summary.fps.toFixed(3)} FPS · ${summary.duration.toFixed(3)} 秒 · ${summary.videoCodec} · ${audio}`);
+      if (summary.audioPacketCount !== undefined) {
+        console.log(`  AAC ${summary.audioPacketCount} 包 · 最长 ${summary.maximumAudioPacketDurationMs.toFixed(3)} ms · 最大间隔 ${summary.maximumAudioGapMs.toFixed(3)} ms · 音画差 ${summary.audioVideoDriftMs.toFixed(3)} ms`);
+      }
       for (const failure of result.failures) console.log(`  - ${failure}`);
       failed ||= !result.ok;
     } catch (error) {

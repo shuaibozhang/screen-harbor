@@ -119,7 +119,7 @@ impl Default for OutputConfig {
                 include_audio: true,
             },
             preview: Some(OutputSettings {
-                format: OutputFormat::Webm,
+                format: OutputFormat::Mp4,
                 resolution: OutputResolution::FitWithin {
                     width: 854,
                     height: 480,

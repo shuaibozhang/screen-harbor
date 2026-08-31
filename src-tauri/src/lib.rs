@@ -11,8 +11,8 @@ use std::{
 
 use frameflow_capture::{DisplayInfo, PhysicalRect, RegionSelection};
 use frameflow_core::{
-    OutputConfig, OutputResolution, RecordingAction, RecordingState, RecordingStateMachine,
-    Resolution,
+    OutputConfig, OutputFormat, OutputResolution, RecordingAction, RecordingState,
+    RecordingStateMachine, Resolution,
 };
 use frameflow_recorder::{
     AudioInputConfig, AudioInputSource, CaptureEngineEvent, CaptureOutputSize, CaptureStats,
@@ -1057,10 +1057,19 @@ fn allocate_recording_paths() -> Result<(PathBuf, PathBuf), String> {
     fs::create_dir_all(&directory)
         .map_err(|error| format!("failed to create recording directory: {error}"))?;
     let id = recording_id()?;
-    let base = format!("FrameFlow-{id}");
+    allocate_recording_paths_in(&directory, &id)
+}
+
+fn allocate_recording_paths_in(
+    directory: &std::path::Path,
+    id: &str,
+) -> Result<(PathBuf, PathBuf), String> {
+    let group_directory = directory.join(format!("FrameFlow-{id}"));
+    fs::create_dir(&group_directory)
+        .map_err(|error| format!("failed to create recording group: {error}"))?;
     Ok((
-        directory.join(format!("{base}.mp4.part")),
-        directory.join(format!("{base}.mp4")),
+        group_directory.join("main.mp4.part"),
+        group_directory.join("main.mp4"),
     ))
 }
 
@@ -1082,7 +1091,15 @@ fn load_output_config(app: &tauri::AppHandle) -> OutputConfig {
 }
 
 fn normalize_loaded_output_config(config: OutputConfig) -> OutputConfig {
-    let config = config.normalized();
+    let mut config = config.normalized();
+    if let Some(preview) = &mut config.preview {
+        preview.format = OutputFormat::Mp4;
+        preview.resolution = OutputResolution::FitWithin {
+            width: 854,
+            height: 480,
+        };
+        preview.fps = 15.min(config.main.fps);
+    }
     if SUPPORTED_CAPTURE_FPS.contains(&config.main.fps) && config.main.resolution.is_valid() {
         config
     } else {
@@ -1240,6 +1257,44 @@ mod tests {
             normalize_loaded_output_config(config).main.resolution,
             OutputResolution::Native
         );
+    }
+
+    #[test]
+    fn migrates_unimplemented_preview_formats_to_the_first_mp4_profile() {
+        let mut config = OutputConfig::default();
+        let preview = config.preview.as_mut().unwrap();
+        preview.format = OutputFormat::Webm;
+        preview.fps = 60;
+        preview.resolution = OutputResolution::Native;
+
+        let normalized = normalize_loaded_output_config(config);
+        let preview = normalized.preview.unwrap();
+        assert_eq!(preview.format, OutputFormat::Mp4);
+        assert_eq!(preview.fps, 15);
+        assert_eq!(
+            preview.resolution,
+            OutputResolution::FitWithin {
+                width: 854,
+                height: 480,
+            }
+        );
+    }
+
+    #[test]
+    fn allocates_each_new_recording_inside_its_own_group_directory() {
+        let directory = std::env::temp_dir().join(format!(
+            "frameflow-recording-layout-{}",
+            recording_id().unwrap()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+
+        let (temporary, output) = allocate_recording_paths_in(&directory, "1700000000009").unwrap();
+        let group = directory.join("FrameFlow-1700000000009");
+        assert_eq!(temporary, group.join("main.mp4.part"));
+        assert_eq!(output, group.join("main.mp4"));
+        assert!(group.is_dir());
+
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

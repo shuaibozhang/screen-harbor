@@ -10,7 +10,7 @@ export type RecordingState =
   | "completed"
   | "failed";
 
-export type OutputStatus = "pending" | "processing" | "completed" | "failed";
+export type OutputStatus = "not_requested" | "pending" | "processing" | "completed" | "failed";
 
 export interface RecentRecording {
   id: string;

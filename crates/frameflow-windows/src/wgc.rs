@@ -108,6 +108,16 @@ impl WgcAudioInput {
             }
         }
     }
+
+    /// Audio timeline blocks are produced off the real-time WASAPI callback.
+    /// Once rendered, they must not be dropped or the MP4 audio timestamps
+    /// become sparse. Blocking here applies backpressure only to the mixer
+    /// worker while the media worker continues draining the bounded queue.
+    pub fn submit_blocking(&self, block: MixedAudioBlock) -> Result<(), PlatformError> {
+        self.sender.send(block).map_err(|_| {
+            PlatformError::WorkerUnavailable("audio encoder queue is disconnected".to_owned())
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

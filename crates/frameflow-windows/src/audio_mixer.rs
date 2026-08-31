@@ -125,6 +125,7 @@ impl SourceTrack {
             let _ = self.samples.pop_front();
             let _ = self.samples.pop_front();
             self.base_frame += 1;
+            self.high_watermark = self.high_watermark.max(self.base_frame);
         }
         if self.base_frame != frame {
             return [0.0, 0.0];
@@ -134,6 +135,7 @@ impl SourceTrack {
             self.samples.pop_front().unwrap_or(0.0),
         ];
         self.base_frame += 1;
+        self.high_watermark = self.high_watermark.max(self.base_frame);
         output
     }
 }
@@ -184,13 +186,9 @@ impl AudioMixer {
         }
     }
 
-    pub fn push(
-        &mut self,
-        source: AudioSourceId,
-        chunk: NormalizedAudioChunk,
-    ) -> Vec<MixedAudioBlock> {
+    pub fn push(&mut self, source: AudioSourceId, chunk: NormalizedAudioChunk) {
         if !chunk.samples.len().is_multiple_of(CHANNELS) {
-            return Vec::new();
+            return;
         }
         let timestamp_frame = chunk
             .capture_time_100ns
@@ -213,28 +211,31 @@ impl AudioMixer {
         let frames = (chunk.samples.len() / CHANNELS) as u64;
         track.append(placement, &chunk.samples);
         track.expected_end = placement.saturating_add(frames);
-        self.drain_complete_blocks()
     }
 
-    pub fn finish(&mut self) -> Vec<MixedAudioBlock> {
-        let mut output = self.drain_complete_blocks();
-        let end = self
-            .tracks
-            .iter()
-            .map(|track| track.high_watermark)
-            .max()
-            .unwrap_or(self.next_output_frame);
-        if end > self.next_output_frame {
-            output.push(self.mix_block(
-                (end - self.next_output_frame).min(AAC_AUDIO_BLOCK_FRAMES as u64) as usize,
-            ));
-            while self.next_output_frame < end {
-                output.push(self.mix_block(
-                    (end - self.next_output_frame).min(AAC_AUDIO_BLOCK_FRAMES as u64) as usize,
-                ));
-            }
+    /// Renders every complete AAC block up to the recording clock. Input tracks
+    /// that have no samples for a frame contribute silence, so the encoded
+    /// timeline remains continuous even when WASAPI loopback is idle.
+    pub fn render_until(&mut self, target_frame: u64) -> Vec<MixedAudioBlock> {
+        let mut output = Vec::new();
+        while target_frame.saturating_sub(self.next_output_frame) >= AAC_AUDIO_BLOCK_FRAMES as u64 {
+            output.push(self.mix_block(AAC_AUDIO_BLOCK_FRAMES));
         }
         output
+    }
+
+    /// Completes the audio timeline at an exact recording frame. This is used
+    /// only after capture sources have stopped and all queued input was read.
+    pub fn finish_at(&mut self, target_frame: u64) -> Vec<MixedAudioBlock> {
+        let mut output = self.render_until(target_frame);
+        if target_frame > self.next_output_frame {
+            output.push(self.mix_block((target_frame - self.next_output_frame) as usize));
+        }
+        output
+    }
+
+    pub fn next_output_frame(&self) -> u64 {
+        self.next_output_frame
     }
 
     fn timeline_frame(&mut self, timestamp_100ns: u64) -> u64 {
@@ -257,34 +258,6 @@ impl AudioMixer {
             }
             Some(origin) => time_to_frames(timestamp_100ns.saturating_sub(origin)),
         }
-    }
-
-    fn drain_complete_blocks(&mut self) -> Vec<MixedAudioBlock> {
-        let Some(ready_end) = self.ready_end() else {
-            return Vec::new();
-        };
-        let mut output = Vec::new();
-        while ready_end.saturating_sub(self.next_output_frame) >= AAC_AUDIO_BLOCK_FRAMES as u64 {
-            output.push(self.mix_block(AAC_AUDIO_BLOCK_FRAMES));
-        }
-        output
-    }
-
-    fn ready_end(&self) -> Option<u64> {
-        AudioSourceId::ALL
-            .into_iter()
-            .filter(|source| self.control(*source).enabled)
-            .map(|source| &self.tracks[source.index()])
-            .try_fold(u64::MAX, |ready, track| {
-                track.initialized.then_some(ready.min(track.high_watermark))
-            })
-            .map(|ready| {
-                if ready == u64::MAX {
-                    self.next_output_frame
-                } else {
-                    ready
-                }
-            })
     }
 
     fn mix_block(&mut self, valid_frames: usize) -> MixedAudioBlock {
@@ -373,10 +346,11 @@ mod tests {
     #[test]
     fn emits_aac_sized_blocks_and_pads_the_tail() {
         let mut mixer = AudioMixer::new(system_only());
-        let blocks = mixer.push(AudioSourceId::System, chunk(1_000_000, 1_100, 0.25));
+        mixer.push(AudioSourceId::System, chunk(1_000_000, 1_100, 0.25));
+        let blocks = mixer.render_until(1_100);
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].valid_frames, AAC_AUDIO_BLOCK_FRAMES);
-        let tail = mixer.finish();
+        let tail = mixer.finish_at(1_100);
         assert_eq!(tail.len(), 1);
         assert_eq!(tail[0].valid_frames, 76);
         assert_eq!(tail[0].samples.len(), AAC_AUDIO_BLOCK_FRAMES * CHANNELS);
@@ -399,10 +373,9 @@ mod tests {
             limiter_ceiling: 0.8,
             ..AudioMixerConfig::default()
         });
-        assert!(mixer
-            .push(AudioSourceId::System, chunk(100, 1_024, 0.5))
-            .is_empty());
-        let blocks = mixer.push(AudioSourceId::Microphone, chunk(100, 1_024, 0.9));
+        mixer.push(AudioSourceId::System, chunk(100, 1_024, 0.5));
+        mixer.push(AudioSourceId::Microphone, chunk(100, 1_024, 0.9));
+        let blocks = mixer.render_until(1_024);
         assert_eq!(blocks.len(), 1);
         assert!(blocks[0].samples.iter().all(|sample| *sample == 0.8));
     }
@@ -410,18 +383,21 @@ mod tests {
     #[test]
     fn live_mute_keeps_the_source_timeline_running() {
         let mut mixer = AudioMixer::new(system_only());
-        let first = mixer.push(AudioSourceId::System, chunk(0, 1_024, 0.3));
+        mixer.push(AudioSourceId::System, chunk(0, 1_024, 0.3));
+        let first = mixer.render_until(1_024);
         assert!(first[0].samples.iter().all(|sample| *sample == 0.3));
 
         let mut control = mixer.source_control(AudioSourceId::System);
         control.muted = true;
         mixer.set_source_control(AudioSourceId::System, control);
-        let muted = mixer.push(AudioSourceId::System, chunk(213_333, 1_024, 0.3));
+        mixer.push(AudioSourceId::System, chunk(213_333, 1_024, 0.3));
+        let muted = mixer.render_until(2_048);
         assert!(muted[0].samples.iter().all(|sample| *sample == 0.0));
 
         control.muted = false;
         mixer.set_source_control(AudioSourceId::System, control);
-        let restored = mixer.push(AudioSourceId::System, chunk(426_666, 1_024, 0.3));
+        mixer.push(AudioSourceId::System, chunk(426_666, 1_024, 0.3));
+        let restored = mixer.render_until(3_072);
         assert!(restored[0].samples.iter().all(|sample| *sample == 0.3));
     }
 
@@ -431,10 +407,9 @@ mod tests {
             max_clock_correction_frames: 48_000,
             ..AudioMixerConfig::default()
         });
-        assert!(mixer
-            .push(AudioSourceId::System, chunk(1_000_000, 1_024, 0.25))
-            .is_empty());
-        let blocks = mixer.push(AudioSourceId::Microphone, chunk(1_100_000, 1_024, 0.5));
+        mixer.push(AudioSourceId::System, chunk(1_000_000, 1_024, 0.25));
+        mixer.push(AudioSourceId::Microphone, chunk(1_100_000, 1_024, 0.5));
+        let blocks = mixer.render_until(1_024);
         assert_eq!(blocks.len(), 1);
         let left = blocks[0]
             .samples
@@ -449,10 +424,11 @@ mod tests {
     #[test]
     fn fixed_recording_origin_preserves_audio_startup_delay() {
         let mut mixer = AudioMixer::with_origin(system_only(), 1_000_000);
-        let blocks = mixer.push(
+        mixer.push(
             AudioSourceId::System,
             chunk(1_100_000, AAC_AUDIO_BLOCK_FRAMES, 0.25),
         );
+        let blocks = mixer.render_until(AAC_AUDIO_BLOCK_FRAMES as u64);
         assert_eq!(blocks.len(), 1);
         assert!(blocks[0].samples[..480 * CHANNELS]
             .iter()
@@ -465,9 +441,11 @@ mod tests {
     #[test]
     fn bounds_clock_correction_and_inserts_a_small_gap() {
         let mut mixer = AudioMixer::new(system_only());
-        let first = mixer.push(AudioSourceId::System, chunk(0, 1_024, 0.2));
+        mixer.push(AudioSourceId::System, chunk(0, 1_024, 0.2));
+        let first = mixer.render_until(1_024);
         assert_eq!(first.len(), 1);
-        let second = mixer.push(AudioSourceId::System, chunk(10_000_000, 1_024, 0.4));
+        mixer.push(AudioSourceId::System, chunk(10_000_000, 1_024, 0.4));
+        let second = mixer.render_until(2_048);
         assert_eq!(second.len(), 1);
         assert!(second[0].samples[..240 * CHANNELS]
             .iter()
@@ -475,10 +453,49 @@ mod tests {
         assert!(second[0].samples[240 * CHANNELS..]
             .iter()
             .all(|sample| *sample == 0.4));
-        let tail = mixer.finish();
+        let tail = mixer.finish_at(2_288);
         assert_eq!(tail[0].valid_frames, 240);
         assert!(tail[0].samples[..240 * CHANNELS]
             .iter()
             .all(|sample| *sample == 0.4));
+    }
+
+    #[test]
+    fn recording_clock_emits_continuous_silence_without_input_callbacks() {
+        let mut mixer = AudioMixer::with_origin(system_only(), 0);
+        let blocks = mixer.render_until((AAC_AUDIO_BLOCK_FRAMES * 3) as u64);
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0].start_frame, 0);
+        assert_eq!(blocks[1].start_frame, 1_024);
+        assert_eq!(blocks[2].start_frame, 2_048);
+        assert!(blocks
+            .iter()
+            .flat_map(|block| &block.samples)
+            .all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn audio_resumes_on_the_continuous_clock_after_a_silent_period() {
+        let mut mixer = AudioMixer::with_origin(system_only(), 0);
+        let silent = mixer.render_until(3_072);
+        assert_eq!(silent.len(), 3);
+
+        mixer.push(AudioSourceId::System, chunk(640_000, 1_024, 0.4));
+        let resumed = mixer.render_until(4_096);
+        assert_eq!(resumed.len(), 1);
+        assert_eq!(resumed[0].start_frame, 3_072);
+        assert!(resumed[0].samples.iter().all(|sample| *sample == 0.4));
+    }
+
+    #[test]
+    fn finish_at_uses_an_exact_contiguous_tail() {
+        let mut mixer = AudioMixer::with_origin(system_only(), 0);
+        let blocks = mixer.finish_at(2_500);
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0].start_frame, 0);
+        assert_eq!(blocks[1].start_frame, 1_024);
+        assert_eq!(blocks[2].start_frame, 2_048);
+        assert_eq!(blocks[2].valid_frames, 452);
+        assert_eq!(mixer.next_output_frame(), 2_500);
     }
 }

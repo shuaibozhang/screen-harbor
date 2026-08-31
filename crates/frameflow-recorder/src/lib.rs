@@ -28,6 +28,8 @@ use windows_sys::Win32::{
 };
 
 pub const CAPTURE_WORKER_PROTOCOL_VERSION: u16 = 2;
+const AUDIO_MIXER_TICK: Duration = Duration::from_millis(10);
+const AUDIO_RENDER_DELAY: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -857,12 +859,25 @@ struct AudioCallbackContext {
     event_handler: Arc<dyn Fn(CaptureEngineEvent) + Send + Sync>,
 }
 
+struct AudioMixerWorkerContext {
+    mixer: Arc<Mutex<frameflow_windows::AudioMixer>>,
+    output: frameflow_windows::WgcAudioInput,
+    failures: Arc<AudioFailureState>,
+    warning: Arc<Mutex<Option<String>>>,
+    event_handler: Arc<dyn Fn(CaptureEngineEvent) + Send + Sync>,
+    timeline_started_at: Instant,
+    paused: Arc<AtomicBool>,
+    pause_offset_100ns: Arc<AtomicU64>,
+}
+
 enum AudioWorkerMessage {
     Packet {
         source: frameflow_windows::AudioSourceId,
         packet: frameflow_windows::AudioPacket,
     },
-    Stop,
+    Stop {
+        final_frame: u64,
+    },
 }
 
 #[derive(Default)]
@@ -921,6 +936,7 @@ impl CaptureEngine {
             },
         )
         .map_err(|error| error.to_string())?;
+        let started_at = Instant::now();
         let audio = if audio_enabled {
             let output = session
                 .audio_input()
@@ -929,6 +945,7 @@ impl CaptureEngine {
                 audio_config,
                 output,
                 frameflow_windows::performance_time_100ns().ok(),
+                started_at,
                 Arc::new(event_handler),
             )?)
         } else {
@@ -940,7 +957,7 @@ impl CaptureEngine {
             frame_count,
             timeline_frame,
             last_error,
-            started_at: Instant::now(),
+            started_at,
             paused_at: None,
             paused_total: Duration::ZERO,
             temporary_path: temporary_path.as_ref().to_path_buf(),
@@ -1066,7 +1083,7 @@ impl CaptureEngine {
             .duration_since(started_at)
             .saturating_sub(paused_total);
         if let Some(audio) = audio {
-            stop_active_audio(audio);
+            stop_active_audio(audio, duration);
         }
         session.stop().map_err(|error| error.to_string())?;
         fs::rename(&temporary_path, &output_path)
@@ -1082,6 +1099,7 @@ fn start_active_audio(
     config: AudioInputConfig,
     output: frameflow_windows::WgcAudioInput,
     timeline_origin_100ns: Option<u64>,
+    timeline_started_at: Instant,
     event_handler: Arc<dyn Fn(CaptureEngineEvent) + Send + Sync>,
 ) -> Result<ActiveAudioCapture, String> {
     let mixer_config = frameflow_windows::AudioMixerConfig {
@@ -1111,16 +1129,23 @@ fn start_active_audio(
         let failures = Arc::clone(&failures);
         let warning = Arc::clone(&warning);
         let event_handler = Arc::clone(&event_handler);
+        let paused = Arc::clone(&paused);
+        let pause_offset_100ns = Arc::clone(&pause_offset_100ns);
         thread::Builder::new()
             .name("frameflow-audio-mixer".to_owned())
             .spawn(move || {
                 run_audio_mixer_worker(
-                    mixer,
-                    output,
+                    AudioMixerWorkerContext {
+                        mixer,
+                        output,
+                        failures,
+                        warning,
+                        event_handler,
+                        timeline_started_at,
+                        paused,
+                        pause_offset_100ns,
+                    },
                     worker_receiver,
-                    failures,
-                    warning,
-                    event_handler,
                 );
             })
             .map_err(|error| format!("failed to start audio mixer worker: {error}"))?
@@ -1247,37 +1272,86 @@ fn start_audio_source(
 }
 
 fn run_audio_mixer_worker(
-    mixer: Arc<Mutex<frameflow_windows::AudioMixer>>,
-    output: frameflow_windows::WgcAudioInput,
+    context: AudioMixerWorkerContext,
     input: mpsc::Receiver<AudioWorkerMessage>,
-    failures: Arc<AudioFailureState>,
-    warning: Arc<Mutex<Option<String>>>,
-    event_handler: Arc<dyn Fn(CaptureEngineEvent) + Send + Sync>,
 ) {
     let mut system_normalizer = None;
     let mut microphone_normalizer = None;
     let mut disabled_failed_sources = [false; 2];
-    while let Ok(message) = input.recv() {
-        let AudioWorkerMessage::Packet { source, packet } = message else {
-            break;
-        };
-        disable_failed_audio_sources(&mixer, &failures, &mut disabled_failed_sources);
-        let normalizer = match source {
-            frameflow_windows::AudioSourceId::System => &mut system_normalizer,
-            frameflow_windows::AudioSourceId::Microphone => &mut microphone_normalizer,
-        };
-        let result = normalize_and_mix_packet(normalizer, &mixer, &output, source, &packet);
-        if let Err(error) = result {
-            failures.source(source).store(true, Ordering::Release);
-            record_audio_error(&event_handler, &warning, source, error.to_string());
-            if let Ok(mut mixer) = mixer.lock() {
-                let mut control = mixer.source_control(source);
-                control.enabled = false;
-                mixer.set_source_control(source, control);
+    let render_delay_frames = duration_to_audio_frames(AUDIO_RENDER_DELAY);
+    loop {
+        disable_failed_audio_sources(
+            &context.mixer,
+            &context.failures,
+            &mut disabled_failed_sources,
+        );
+        match input.recv_timeout(AUDIO_MIXER_TICK) {
+            Ok(AudioWorkerMessage::Packet { source, packet }) => {
+                let normalizer = match source {
+                    frameflow_windows::AudioSourceId::System => &mut system_normalizer,
+                    frameflow_windows::AudioSourceId::Microphone => &mut microphone_normalizer,
+                };
+                let result = normalize_audio_packet(normalizer, &context.mixer, source, &packet);
+                if let Err(error) = result {
+                    context
+                        .failures
+                        .source(source)
+                        .store(true, Ordering::Release);
+                    record_audio_error(
+                        &context.event_handler,
+                        &context.warning,
+                        source,
+                        error.to_string(),
+                    );
+                    if let Ok(mut mixer) = context.mixer.lock() {
+                        let mut control = mixer.source_control(source);
+                        control.enabled = false;
+                        mixer.set_source_control(source, control);
+                    }
+                }
+            }
+            Ok(AudioWorkerMessage::Stop { final_frame }) => {
+                flush_audio_tail(
+                    &context.mixer,
+                    &context.output,
+                    system_normalizer,
+                    microphone_normalizer,
+                    final_frame,
+                );
+                return;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let final_frame = audio_clock_frame(
+                    context.timeline_started_at,
+                    context.pause_offset_100ns.load(Ordering::Acquire),
+                );
+                flush_audio_tail(
+                    &context.mixer,
+                    &context.output,
+                    system_normalizer,
+                    microphone_normalizer,
+                    final_frame,
+                );
+                return;
+            }
+        }
+        if !context.paused.load(Ordering::Acquire) {
+            let clock_frame = audio_clock_frame(
+                context.timeline_started_at,
+                context.pause_offset_100ns.load(Ordering::Acquire),
+            );
+            if render_audio_until(
+                &context.mixer,
+                &context.output,
+                clock_frame.saturating_sub(render_delay_frames),
+            )
+            .is_err()
+            {
+                return;
             }
         }
     }
-    flush_audio_tail(&mixer, &output, system_normalizer, microphone_normalizer);
 }
 
 fn disable_failed_audio_sources(
@@ -1303,10 +1377,9 @@ fn disable_failed_audio_sources(
     }
 }
 
-fn normalize_and_mix_packet(
+fn normalize_audio_packet(
     normalizer: &mut Option<frameflow_windows::AudioNormalizer>,
     mixer: &Mutex<frameflow_windows::AudioMixer>,
-    output: &frameflow_windows::WgcAudioInput,
     source: frameflow_windows::AudioSourceId,
     packet: &frameflow_windows::AudioPacket,
 ) -> Result<(), frameflow_windows::PlatformError> {
@@ -1317,24 +1390,28 @@ fn normalize_and_mix_packet(
         .as_mut()
         .expect("audio normalizer was initialized")
         .push(packet)?;
-    let blocks = mixer
+    mixer
         .lock()
         .map_err(|_| {
             frameflow_windows::PlatformError::AudioCapture("audio mixer is unavailable".to_owned())
         })?
         .push(source, chunk);
-    submit_live_audio_blocks(output, blocks)
+    Ok(())
 }
 
-fn submit_live_audio_blocks(
+fn render_audio_until(
+    mixer: &Mutex<frameflow_windows::AudioMixer>,
     output: &frameflow_windows::WgcAudioInput,
-    blocks: Vec<frameflow_windows::MixedAudioBlock>,
+    target_frame: u64,
 ) -> Result<(), frameflow_windows::PlatformError> {
+    let blocks = mixer
+        .lock()
+        .map_err(|_| {
+            frameflow_windows::PlatformError::AudioCapture("audio mixer is unavailable".to_owned())
+        })?
+        .render_until(target_frame);
     for block in blocks {
-        match output.submit(block) {
-            Ok(()) | Err(frameflow_windows::PlatformError::AudioQueueFull) => {}
-            Err(error) => return Err(error),
-        }
+        output.submit_blocking(block)?;
     }
     Ok(())
 }
@@ -1390,12 +1467,14 @@ fn capture_audio_stats(audio: &ActiveAudioCapture) -> Result<CaptureAudioStats, 
     })
 }
 
-fn stop_active_audio(mut audio: ActiveAudioCapture) {
+fn stop_active_audio(mut audio: ActiveAudioCapture, final_duration: Duration) {
     audio.paused.store(true, Ordering::Release);
     for source in audio.sources.drain(..) {
         let _ = source.session.stop();
     }
-    let _ = audio.worker_input.send(AudioWorkerMessage::Stop);
+    let _ = audio.worker_input.send(AudioWorkerMessage::Stop {
+        final_frame: duration_to_audio_frames(final_duration),
+    });
     if let Some(worker) = audio.worker.take() {
         let _ = worker.join();
     }
@@ -1406,6 +1485,7 @@ fn flush_audio_tail(
     output: &frameflow_windows::WgcAudioInput,
     mut system_normalizer: Option<frameflow_windows::AudioNormalizer>,
     mut microphone_normalizer: Option<frameflow_windows::AudioNormalizer>,
+    final_frame: u64,
 ) {
     if let Ok(mut mixer) = mixer.lock() {
         for (source, tail) in [
@@ -1423,11 +1503,10 @@ fn flush_audio_tail(
             ),
         ] {
             if let Some(tail) = tail.filter(|chunk| chunk.frames() > 0) {
-                let blocks = mixer.push(source, tail);
-                submit_final_audio_blocks(output, blocks);
+                mixer.push(source, tail);
             }
         }
-        let blocks = mixer.finish();
+        let blocks = mixer.finish_at(final_frame);
         submit_final_audio_blocks(output, blocks);
     }
 }
@@ -1437,8 +1516,26 @@ fn submit_final_audio_blocks(
     blocks: Vec<frameflow_windows::MixedAudioBlock>,
 ) {
     for block in blocks {
-        let _ = output.submit_wait(block, Duration::from_millis(500));
+        let _ = output.submit_blocking(block);
     }
+}
+
+fn audio_clock_frame(started_at: Instant, pause_offset_100ns: u64) -> u64 {
+    audio_frame_for_elapsed(started_at.elapsed(), pause_offset_100ns)
+}
+
+fn audio_frame_for_elapsed(elapsed: Duration, pause_offset_100ns: u64) -> u64 {
+    let elapsed_100ns = duration_to_100ns(elapsed).saturating_sub(pause_offset_100ns);
+    elapsed_100ns.saturating_mul(u64::from(frameflow_windows::NORMALIZED_AUDIO_SAMPLE_RATE))
+        / 10_000_000
+}
+
+fn duration_to_audio_frames(duration: Duration) -> u64 {
+    duration
+        .as_nanos()
+        .saturating_mul(u128::from(frameflow_windows::NORMALIZED_AUDIO_SAMPLE_RATE))
+        .saturating_div(1_000_000_000)
+        .min(u128::from(u64::MAX)) as u64
 }
 
 fn duration_to_100ns(duration: Duration) -> u64 {
@@ -1509,6 +1606,23 @@ mod tests {
         let (dropped_frames, effective_fps) = capture_performance(450, 600, 10_000);
         assert_eq!(dropped_frames, 150);
         assert!((effective_fps - 45.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn audio_clock_runs_at_48khz_and_excludes_paused_time() {
+        assert_eq!(audio_frame_for_elapsed(Duration::from_secs(10), 0), 480_000);
+        assert_eq!(
+            audio_frame_for_elapsed(Duration::from_secs(10), 20_000_000),
+            384_000
+        );
+    }
+
+    #[test]
+    fn audio_clock_saturates_when_pause_offset_exceeds_elapsed_time() {
+        assert_eq!(
+            audio_frame_for_elapsed(Duration::from_secs(1), 20_000_000),
+            0
+        );
     }
 
     #[test]
