@@ -1,6 +1,6 @@
 import { create } from "zustand";
-import { beginSelection, getAppSnapshot, setAudioInput, setCaptureFps } from "./bridge";
-import type { AppSnapshot } from "./domain";
+import { beginSelection, getAppSnapshot, setAudioInput, setOutputSettings } from "./bridge";
+import type { AppSnapshot, OutputResolution } from "./domain";
 
 interface AppStore {
   snapshot: AppSnapshot | null;
@@ -8,7 +8,7 @@ interface AppStore {
   error: string | null;
   hydrate: () => Promise<void>;
   startSelection: () => Promise<void>;
-  updateCaptureFps: (fps: number) => Promise<void>;
+  updateOutputSettings: (fps: number, resolution: OutputResolution) => Promise<void>;
   updateAudioInput: (source: "microphone" | "systemAudio", enabled: boolean) => Promise<void>;
 }
 
@@ -31,12 +31,12 @@ export const useAppStore = create<AppStore>((set) => ({
       set({ error: "暂时无法进入框选，请稍后重试。" });
     }
   },
-  updateCaptureFps: async (fps) => {
+  updateOutputSettings: async (fps, resolution) => {
     try {
-      await setCaptureFps(fps);
+      await setOutputSettings(fps, resolution);
       set({ snapshot: await getAppSnapshot(), error: null });
     } catch (cause) {
-      set({ error: `无法保存帧率设置：${String(cause)}` });
+      set({ error: `无法保存输出设置：${String(cause)}` });
       throw cause;
     }
   },

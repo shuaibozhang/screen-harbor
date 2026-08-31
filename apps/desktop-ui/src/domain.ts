@@ -28,11 +28,16 @@ export interface AppSnapshot {
   systemAudio: { enabled: boolean; deviceName?: string; available: boolean };
   outputSummary: string;
   captureFps: number;
+  outputResolution: OutputResolution;
   supportedCaptureFps: number[];
   monitorRefreshRateHz?: number;
   recommendedCaptureFps: number;
   recentRecordings: RecentRecording[];
 }
+
+export type OutputResolution =
+  | { mode: "native" }
+  | { mode: "fitWithin"; width: number; height: number };
 
 export interface RegionSelection {
   displayId: string;
@@ -42,12 +47,19 @@ export interface RegionSelection {
 
 export interface CaptureStats {
   frameCount: number;
+  droppedFrames: number;
+  effectiveFps: number;
   elapsedMs: number;
   paused: boolean;
+  videoEncoder: {
+    name: string;
+    hardwareAccelerated?: boolean;
+  };
   lastError?: string;
   audio?: {
     microphone: LiveAudioInput;
     systemAudio: LiveAudioInput;
+    droppedPackets: number;
     warning?: string;
   };
 }

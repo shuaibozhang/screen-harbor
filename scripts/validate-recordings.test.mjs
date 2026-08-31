@@ -16,7 +16,7 @@ test("parses rational frame rates", () => {
   assert.ok(Number.isNaN(parseRate("0/0")));
 });
 
-test("accepts a valid physical-pixel H.264/AAC recording", () => {
+test("accepts a valid H.264/AAC recording at the expected output size", () => {
   const result = validateProbe(validProbe, {
     width: 1920,
     height: 1080,
@@ -52,4 +52,3 @@ test("parses explicit validation expectations", () => {
   assert.equal(options.duration, 8);
   assert.equal(options.audio, "required");
 });
-

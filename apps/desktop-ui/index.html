@@ -8,6 +8,19 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      (() => {
+        const showBootstrapError = (reason) => {
+          const root = document.getElementById("root");
+          if (!root || root.childElementCount > 0) return;
+          const message = reason instanceof Error ? reason.message : String(reason || "未知错误");
+          document.title = `FrameFlow 启动失败：${message}`;
+          root.innerHTML = `<main style="min-height:100vh;display:grid;place-items:center;padding:32px;color:#8d2929;font:14px/1.6 'Microsoft YaHei UI','Segoe UI',sans-serif;text-align:center"><div><strong>FrameFlow 界面启动失败</strong><br><span style="color:#687286">${message.replace(/[&<>\"']/g, (character) => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[character]))}</span></div></main>`;
+        };
+        window.addEventListener("error", (event) => showBootstrapError(event.error || event.message));
+        window.addEventListener("unhandledrejection", (event) => showBootstrapError(event.reason));
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

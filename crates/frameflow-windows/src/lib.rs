@@ -16,6 +16,7 @@ pub use audio_mixer::{
     AAC_AUDIO_BLOCK_FRAMES,
 };
 pub use displays::{enable_per_monitor_v2_dpi, list_displays};
+pub use media_foundation::VideoEncoderInfo;
 pub use selection_overlay::{start_native_selection, NativeSelectionSession};
 pub use wasapi_loopback::{
     start_microphone_capture, start_system_audio_loopback, start_wasapi_capture,
@@ -78,6 +79,8 @@ pub enum PlatformError {
     AudioQueueFull,
     #[error("unsupported output frame rate: {0} FPS")]
     InvalidFrameRate(u32),
+    #[error("output dimensions must be positive even numbers: {width}x{height}")]
+    InvalidOutputSize { width: u32, height: u32 },
 }
 
 pub fn flush_desktop_compositor() -> Result<(), PlatformError> {

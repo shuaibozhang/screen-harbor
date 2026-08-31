@@ -34,7 +34,9 @@ use windows::{
     },
 };
 
-use crate::{exclude_window_from_capture, PlatformError};
+use crate::{
+    displays::enable_current_thread_per_monitor_v2_dpi, exclude_window_from_capture, PlatformError,
+};
 
 const MIN_SELECTION_SIZE: i32 = 32;
 const BORDER_THICKNESS: i32 = 5;
@@ -218,6 +220,12 @@ fn run_overlay<F>(
 ) where
     F: FnMut(Option<PhysicalRect>),
 {
+    if let Err(error) = enable_current_thread_per_monitor_v2_dpi() {
+        let _ = startup.send(Err(format!(
+            "failed to enable physical-pixel selection coordinates: {error}"
+        )));
+        return;
+    }
     let result = unsafe { create_overlay_window(display_bounds) };
     let (overlay, mut overlay_state, overlay_brush, overlay_class) = match result {
         Ok(value) => value,

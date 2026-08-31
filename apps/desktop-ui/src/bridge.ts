@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AppSnapshot } from "./domain";
+import type { AppSnapshot, OutputResolution } from "./domain";
 
 const developmentSnapshot: AppSnapshot = {
   recordingState: "idle",
@@ -8,29 +8,33 @@ const developmentSnapshot: AppSnapshot = {
   systemAudio: { enabled: false, deviceName: "扬声器（默认设备）", available: true },
   outputSummary: "MP4 · 有声音 / WebM · 480p · 有声音 / 封面",
   captureFps: 30,
+  outputResolution: { mode: "native" },
   supportedCaptureFps: [24, 30, 60],
   monitorRefreshRateHz: 60,
   recommendedCaptureFps: 60,
   recentRecordings: [],
 };
 
-const isTauri = () => "__TAURI_INTERNALS__" in window;
+export const isTauriRuntime = () => "__TAURI_INTERNALS__" in window;
 
 export async function getAppSnapshot(): Promise<AppSnapshot> {
-  return isTauri() ? invoke<AppSnapshot>("get_app_snapshot") : developmentSnapshot;
+  return isTauriRuntime() ? invoke<AppSnapshot>("get_app_snapshot") : developmentSnapshot;
 }
 
 export async function beginSelection(): Promise<void> {
-  if (isTauri()) await invoke("begin_selection");
+  if (isTauriRuntime()) await invoke("begin_selection");
 }
 
-export async function setCaptureFps(fps: number): Promise<number> {
-  return isTauri() ? invoke<number>("set_capture_fps", { fps }) : fps;
+export async function setOutputSettings(
+  fps: number,
+  resolution: OutputResolution,
+): Promise<void> {
+  if (isTauriRuntime()) await invoke("set_output_settings", { fps, resolution });
 }
 
 export async function setAudioInput(
   source: "microphone" | "systemAudio",
   enabled: boolean,
 ): Promise<void> {
-  if (isTauri()) await invoke("set_audio_input", { source, enabled });
+  if (isTauriRuntime()) await invoke("set_audio_input", { source, enabled });
 }

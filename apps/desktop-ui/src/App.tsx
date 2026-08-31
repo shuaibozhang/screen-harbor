@@ -12,19 +12,52 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useState } from "react";
+import { isTauriRuntime } from "./bridge";
 import { useAppStore } from "./store";
-import type { FinalizationEvent, RecordingState } from "./domain";
+import type { FinalizationEvent, OutputResolution, RecordingState } from "./domain";
 import "./styles.css";
 
 function StatusDot({ available }: { available: boolean }) {
   return <span className={available ? "status-dot ready" : "status-dot"} aria-hidden="true" />;
 }
 
+type ResolutionChoice = "native" | "1080p" | "720p" | "custom";
+
+function resolutionChoice(resolution: OutputResolution): ResolutionChoice {
+  if (resolution.mode === "native") return "native";
+  if (resolution.width === 1920 && resolution.height === 1080) return "1080p";
+  if (resolution.width === 1280 && resolution.height === 720) return "720p";
+  return "custom";
+}
+
+function outputResolution(
+  choice: ResolutionChoice,
+  customWidth: number,
+  customHeight: number,
+): OutputResolution {
+  if (choice === "native") return { mode: "native" };
+  if (choice === "1080p") return { mode: "fitWithin", width: 1920, height: 1080 };
+  if (choice === "720p") return { mode: "fitWithin", width: 1280, height: 720 };
+  return { mode: "fitWithin", width: customWidth, height: customHeight };
+}
+
+function sameResolution(left: OutputResolution, right: OutputResolution) {
+  return left.mode === right.mode
+    && (left.mode === "native" || (
+      right.mode === "fitWithin"
+      && left.width === right.width
+      && left.height === right.height
+    ));
+}
+
 export function App() {
-  const { snapshot, loading, error, hydrate, startSelection, updateCaptureFps, updateAudioInput } = useAppStore();
+  const { snapshot, loading, error, hydrate, startSelection, updateOutputSettings, updateAudioInput } = useAppStore();
   const [finalizationError, setFinalizationError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [draftFps, setDraftFps] = useState(30);
+  const [draftResolution, setDraftResolution] = useState<ResolutionChoice>("native");
+  const [customWidth, setCustomWidth] = useState(1920);
+  const [customHeight, setCustomHeight] = useState(1080);
   const [savingSettings, setSavingSettings] = useState(false);
   const [savingAudio, setSavingAudio] = useState<"microphone" | "systemAudio" | null>(null);
   const [showAllRecordings, setShowAllRecordings] = useState(false);
@@ -32,6 +65,7 @@ export function App() {
 
   useEffect(() => {
     void hydrate();
+    if (!isTauriRuntime()) return;
     let unlistenState: (() => void) | undefined;
     let unlistenFinalization: (() => void) | undefined;
     let disposed = false;
@@ -61,19 +95,40 @@ export function App() {
     };
   }, [hydrate]);
 
-  if (loading || !snapshot) {
+  if (loading) {
     return <main className="shell loading">正在准备 FrameFlow…</main>;
+  }
+
+  if (!snapshot) {
+    return (
+      <main className="shell loading">
+        <div className="startup-error" role="alert">
+          <strong>FrameFlow 初始化失败</strong>
+          <span>{error ?? "无法读取应用状态。"}</span>
+          <button type="button" onClick={() => void hydrate()}>重新加载</button>
+        </div>
+      </main>
+    );
   }
 
   const openSettings = () => {
     setDraftFps(snapshot.captureFps);
+    const choice = resolutionChoice(snapshot.outputResolution);
+    setDraftResolution(choice);
+    if (snapshot.outputResolution.mode === "fitWithin" && choice === "custom") {
+      setCustomWidth(snapshot.outputResolution.width);
+      setCustomHeight(snapshot.outputResolution.height);
+    }
     setSettingsOpen(true);
   };
 
   const saveSettings = async () => {
     setSavingSettings(true);
     try {
-      await updateCaptureFps(draftFps);
+      await updateOutputSettings(
+        draftFps,
+        outputResolution(draftResolution, customWidth, customHeight),
+      );
       setSettingsOpen(false);
     } catch {
       // The store exposes the backend error in the main alert.
@@ -84,6 +139,11 @@ export function App() {
 
   const exceedsMonitorRefresh = snapshot.monitorRefreshRateHz !== undefined
     && draftFps > snapshot.monitorRefreshRateHz + 1;
+  const draftOutputResolution = outputResolution(draftResolution, customWidth, customHeight);
+  const invalidCustomResolution = draftResolution === "custom"
+    && (!Number.isInteger(customWidth) || !Number.isInteger(customHeight) || customWidth < 2 || customHeight < 2);
+  const settingsUnchanged = draftFps === snapshot.captureFps
+    && sameResolution(draftOutputResolution, snapshot.outputResolution);
 
   const toggleAudio = async (source: "microphone" | "systemAudio", enabled: boolean) => {
     setSavingAudio(source);
@@ -199,10 +259,42 @@ export function App() {
         }}>
           <section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
             <header>
-              <div><p>输出设置</p><h2 id="settings-title">录制帧率</h2></div>
+              <div><p>输出设置</p><h2 id="settings-title">视频</h2></div>
               <button className="icon-button" aria-label="关闭设置" disabled={savingSettings} onClick={() => setSettingsOpen(false)}><X size={18} /></button>
             </header>
-            <p className="settings-help">帧率越高，滚动和动画越流畅，同时会增加编码负载和文件大小。</p>
+            <p className="settings-help">原始分辨率保留选区的全部物理像素；缩放输出只在编码阶段生效，不改变选区范围。</p>
+            <div className="setting-group">
+              <h3>输出分辨率</h3>
+              <div className="resolution-options" role="radiogroup" aria-label="输出分辨率">
+                {([
+                  ["native", "原始", "最佳画质"],
+                  ["1080p", "1080p", "最高 1920×1080"],
+                  ["720p", "720p", "最高 1280×720"],
+                  ["custom", "自定义", "保持选区比例"],
+                ] as const).map(([value, label, description]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    role="radio"
+                    aria-checked={draftResolution === value}
+                    className={draftResolution === value ? "resolution-option selected" : "resolution-option"}
+                    onClick={() => setDraftResolution(value)}
+                  >
+                    <strong>{label}</strong>
+                    <small>{description}</small>
+                  </button>
+                ))}
+              </div>
+              {draftResolution === "custom" && (
+                <div className="custom-resolution">
+                  <label>最大宽度<input type="number" min="2" step="2" value={customWidth} onChange={(event) => setCustomWidth(Number.isFinite(event.currentTarget.valueAsNumber) ? event.currentTarget.valueAsNumber : 0)} /></label>
+                  <span>×</span>
+                  <label>最大高度<input type="number" min="2" step="2" value={customHeight} onChange={(event) => setCustomHeight(Number.isFinite(event.currentTarget.valueAsNumber) ? event.currentTarget.valueAsNumber : 0)} /></label>
+                </div>
+              )}
+            </div>
+            <div className="setting-group">
+              <h3>录制帧率</h3>
             <div className="monitor-rate">
               <MonitorSpeaker size={16} />
               <span>
@@ -229,9 +321,10 @@ export function App() {
             {exceedsMonitorRefresh && (
               <p className="fps-warning" role="status">该帧率高于当前屏幕刷新率，视频仍会按 {draftFps} FPS 输出，但可能包含重复帧并增加文件大小。</p>
             )}
+            </div>
             <footer>
               <button disabled={savingSettings} onClick={() => setSettingsOpen(false)}>取消</button>
-              <button className="settings-save" disabled={savingSettings || draftFps === snapshot.captureFps} onClick={() => void saveSettings()}>
+              <button className="settings-save" disabled={savingSettings || invalidCustomResolution || settingsUnchanged} onClick={() => void saveSettings()}>
                 {savingSettings ? "保存中…" : "保存设置"}
               </button>
             </footer>

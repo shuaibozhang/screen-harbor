@@ -10,8 +10,8 @@ use windows::{
         UI::{
             HiDpi::{
                 AreDpiAwarenessContextsEqual, GetDpiForMonitor, GetThreadDpiAwarenessContext,
-                SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
-                MDT_EFFECTIVE_DPI,
+                SetProcessDpiAwarenessContext, SetThreadDpiAwarenessContext,
+                DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
             },
             WindowsAndMessaging::MONITORINFOF_PRIMARY,
         },
@@ -29,6 +29,15 @@ pub fn enable_per_monitor_v2_dpi() -> Result<(), PlatformError> {
     }
 
     unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)? };
+    Ok(())
+}
+
+pub(crate) fn enable_current_thread_per_monitor_v2_dpi() -> Result<(), PlatformError> {
+    let previous =
+        unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+    if previous.0.is_null() {
+        return Err(WindowsError::from_win32().into());
+    }
     Ok(())
 }
 

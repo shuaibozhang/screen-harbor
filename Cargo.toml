@@ -1,10 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/frameflow-capture",
-  "crates/frameflow-core",
-  "crates/frameflow-windows",
-  "src-tauri",
+    "crates/frameflow-capture",
+    "crates/frameflow-core",
+    "crates/frameflow-recorder",
+    "crates/frameflow-windows",
+    "src-tauri",
 ]
 
 [workspace.package]

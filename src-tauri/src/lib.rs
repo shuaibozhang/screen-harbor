@@ -4,18 +4,22 @@ use std::{
     fs,
     path::PathBuf,
     process::Command,
-    sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc, Arc, Mutex,
-    },
+    sync::{mpsc, Mutex, OnceLock},
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use frameflow_capture::{CaptureSession, DisplayInfo, PhysicalRect, RegionSelection};
-use frameflow_core::{OutputConfig, RecordingAction, RecordingState, RecordingStateMachine};
+use frameflow_capture::{DisplayInfo, PhysicalRect, RegionSelection};
+use frameflow_core::{
+    OutputConfig, OutputResolution, RecordingAction, RecordingState, RecordingStateMachine,
+    Resolution,
+};
+use frameflow_recorder::{
+    AudioInputConfig, AudioInputSource, CaptureEngineEvent, CaptureOutputSize, CaptureStats,
+    CaptureWorkerClient, FinalizedCapture,
+};
 use recording_index::{RecordingIndex, RecordingSummary};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -28,107 +32,16 @@ const TRAY_QUIT_ID: &str = "quit";
 struct AppState {
     recording: Mutex<RecordingStateMachine>,
     selection: Mutex<Option<ActiveSelection>>,
-    capture: Mutex<Option<ActiveCapture>>,
-    recording_index: Mutex<Option<RecordingIndex>>,
+    capture: Mutex<Option<CaptureWorkerClient>>,
+    recording_index: OnceLock<Result<RecordingIndex, String>>,
     native_selection: Mutex<Option<frameflow_windows::NativeSelectionSession>>,
     output_config: Mutex<OutputConfig>,
     audio_config: Mutex<AudioInputConfig>,
 }
 
-#[derive(Clone, Copy, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AudioInputConfig {
-    microphone: bool,
-    system_audio: bool,
-}
-
-impl Default for AudioInputConfig {
-    fn default() -> Self {
-        Self {
-            microphone: false,
-            system_audio: true,
-        }
-    }
-}
-
 struct ActiveSelection {
     display: DisplayInfo,
     region: Option<RegionSelection>,
-}
-
-struct ActiveCapture {
-    session: frameflow_windows::WgcCaptureSession,
-    audio: Option<ActiveAudioCapture>,
-    frame_count: Arc<AtomicU64>,
-    last_error: Arc<Mutex<Option<String>>>,
-    started_at: Instant,
-    paused_at: Option<Instant>,
-    paused_total: Duration,
-    temporary_path: PathBuf,
-    output_path: PathBuf,
-}
-
-struct ActiveAudioCapture {
-    config: AudioInputConfig,
-    sources: Vec<ActiveAudioSource>,
-    mixer: Arc<Mutex<frameflow_windows::AudioMixer>>,
-    output: frameflow_windows::WgcAudioInput,
-    paused: Arc<AtomicBool>,
-    pause_offset_100ns: Arc<AtomicU64>,
-    warning: Arc<Mutex<Option<String>>>,
-}
-
-struct ActiveAudioSource {
-    id: frameflow_windows::AudioSourceId,
-    session: frameflow_windows::WasapiCaptureSession,
-    normalizer: Arc<Mutex<Option<frameflow_windows::AudioNormalizer>>>,
-    failed: Arc<AtomicBool>,
-}
-
-#[derive(Clone)]
-struct AudioCallbackContext {
-    mixer: Arc<Mutex<frameflow_windows::AudioMixer>>,
-    output: frameflow_windows::WgcAudioInput,
-    paused: Arc<AtomicBool>,
-    pause_offset_100ns: Arc<AtomicU64>,
-    warning: Arc<Mutex<Option<String>>>,
-    app: tauri::AppHandle,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CaptureStats {
-    frame_count: u64,
-    elapsed_ms: u128,
-    paused: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    last_error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    audio: Option<CaptureAudioStats>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CaptureAudioStats {
-    microphone: LiveInputSnapshot,
-    system_audio: LiveInputSnapshot,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    warning: Option<String>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LiveInputSnapshot {
-    enabled: bool,
-    muted: bool,
-    disconnected: bool,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AudioWarningEvent {
-    source: &'static str,
-    message: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -139,11 +52,6 @@ struct FinalizationEvent {
     output_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
-}
-
-struct FinalizedCapture {
-    output_path: PathBuf,
-    duration: Duration,
 }
 
 #[derive(Serialize)]
@@ -164,6 +72,7 @@ struct AppSnapshot {
     system_audio: InputSnapshot,
     output_summary: String,
     capture_fps: u16,
+    output_resolution: OutputResolution,
     supported_capture_fps: [u16; 3],
     monitor_refresh_rate_hz: Option<u32>,
     recommended_capture_fps: u16,
@@ -239,21 +148,15 @@ fn get_app_snapshot(
         .lock()
         .map_err(|_| "recording state is unavailable".to_owned())?
         .state();
-
     let save_directory = save_directory().to_string_lossy().into_owned();
-    let recent_recordings = state
-        .recording_index
-        .lock()
-        .map_err(|_| "recording index is unavailable".to_owned())?
-        .as_ref()
-        .ok_or_else(|| "recording index is not initialized".to_owned())?
-        .recent(usize::MAX)?;
-    let capture_fps = state
+    let recent_recordings = recording_index(&state, &app)?.recent(usize::MAX)?;
+    let output_config = state
         .output_config
         .lock()
         .map_err(|_| "output settings are unavailable".to_owned())?
-        .main
-        .fps;
+        .clone();
+    let capture_fps = output_config.main.fps;
+    let output_resolution = output_config.main.resolution;
     let monitor_refresh_rate_hz = active_display(&app)
         .ok()
         .and_then(|display| display.refresh_rate_hz);
@@ -288,8 +191,12 @@ fn get_app_snapshot(
             available: audio_endpoints.system_output.is_some(),
             device_name: audio_endpoints.system_output.map(|endpoint| endpoint.name),
         },
-        output_summary: format!("MP4 · {codec_label} · {capture_fps} FPS · {audio_label}"),
+        output_summary: format!(
+            "MP4 · {codec_label} · {} · {capture_fps} FPS · {audio_label}",
+            output_resolution_label(output_resolution)
+        ),
         capture_fps,
+        output_resolution,
         supported_capture_fps: SUPPORTED_CAPTURE_FPS,
         monitor_refresh_rate_hz,
         recommended_capture_fps,
@@ -341,15 +248,13 @@ fn set_audio_input(
 }
 
 #[tauri::command]
-fn open_recording_location(state: State<'_, AppState>, recording_id: String) -> Result<(), String> {
+fn open_recording_location(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    recording_id: String,
+) -> Result<(), String> {
     let path = {
-        let index = state
-            .recording_index
-            .lock()
-            .map_err(|_| "recording index is unavailable".to_owned())?;
-        let index = index
-            .as_ref()
-            .ok_or_else(|| "recording index is not initialized".to_owned())?;
+        let index = recording_index(&state, &app)?;
         index.reconcile()?;
         index.path_for_id(&recording_id)?
     };
@@ -360,14 +265,25 @@ fn open_recording_location(state: State<'_, AppState>, recording_id: String) -> 
         .map_err(|error| format!("failed to open recording location: {error}"))
 }
 
+fn output_resolution_label(resolution: OutputResolution) -> String {
+    match resolution {
+        OutputResolution::Native => "原始分辨率".to_owned(),
+        OutputResolution::FitWithin { width, height } => format!("最高 {width}×{height}"),
+    }
+}
+
 #[tauri::command]
-fn set_capture_fps(
+fn set_output_settings(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     fps: u16,
-) -> Result<u16, String> {
+    resolution: OutputResolution,
+) -> Result<(), String> {
     if !SUPPORTED_CAPTURE_FPS.contains(&fps) {
         return Err(format!("unsupported capture frame rate: {fps} FPS"));
+    }
+    if !resolution.is_valid() {
+        return Err("output resolution must be at least 2×2".to_owned());
     }
     if state
         .recording
@@ -385,13 +301,14 @@ fn set_capture_fps(
         .map_err(|_| "output settings are unavailable".to_owned())?
         .clone();
     next.main.fps = fps;
+    next.main.resolution = resolution;
     next = next.normalized();
     save_output_config(&app, &next)?;
     *state
         .output_config
         .lock()
         .map_err(|_| "output settings are unavailable".to_owned())? = next;
-    Ok(fps)
+    Ok(())
 }
 
 #[tauri::command]
@@ -705,53 +622,36 @@ fn start_capture(
     frameflow_windows::flush_desktop_compositor().map_err(|error| error.to_string())?;
 
     let (temporary_path, output_path) = allocate_recording_paths()?;
-    let capture_fps = state
+    let output_config = state
         .output_config
         .lock()
         .map_err(|_| "output settings are unavailable".to_owned())?
-        .main
-        .fps;
+        .clone();
+    let capture_fps = output_config.main.fps;
+    let resolved_output = output_config.main.resolution.resolve(Resolution {
+        width: selection.capture_rect.width,
+        height: selection.capture_rect.height,
+    });
+    let output_size = CaptureOutputSize::new(resolved_output.width, resolved_output.height)?;
     let audio_config = *state
         .audio_config
         .lock()
         .map_err(|_| "audio settings are unavailable".to_owned())?;
-    let audio_enabled = audio_config.system_audio || audio_config.microphone;
-    let capture_options = frameflow_windows::Mp4CaptureOptions::new(u32::from(capture_fps))
-        .map_err(|error| error.to_string())?
-        .with_audio(audio_enabled);
-    let frame_count = Arc::new(AtomicU64::new(0));
-    let last_error = Arc::new(Mutex::new(None));
-    let session = frameflow_windows::start_region_mp4_capture(
+    let event_app = app.clone();
+    let capture = CaptureWorkerClient::start(
         &selection,
+        output_size,
         &temporary_path,
-        capture_options,
-        {
-            let frame_count = Arc::clone(&frame_count);
-            let last_error = Arc::clone(&last_error);
-            move |result| match result {
-                Ok(frame) => frame_count.store(frame.sequence, Ordering::Release),
-                Err(error) => {
-                    if let Ok(mut last_error) = last_error.lock() {
-                        *last_error = Some(error.to_string());
-                    }
-                }
+        &output_path,
+        u32::from(capture_fps),
+        audio_config,
+        move |event| match event {
+            CaptureEngineEvent::AudioWarning { .. } => {
+                let _ = event_app.emit("recording://audio-warning", event);
             }
         },
     )
     .map_err(|error| error.to_string())?;
-    let audio = if audio_enabled {
-        let output = session
-            .audio_input()
-            .ok_or_else(|| "audio encoder input is unavailable".to_owned())?;
-        Some(start_active_audio(
-            app.clone(),
-            audio_config,
-            output,
-            frameflow_windows::performance_time_100ns().ok(),
-        ))
-    } else {
-        None
-    };
 
     let next_state = state
         .recording
@@ -762,183 +662,11 @@ fn start_capture(
     *state
         .capture
         .lock()
-        .map_err(|_| "capture state is unavailable".to_owned())? = Some(ActiveCapture {
-        session,
-        audio,
-        frame_count,
-        last_error,
-        started_at: Instant::now(),
-        paused_at: None,
-        paused_total: Duration::ZERO,
-        temporary_path,
-        output_path,
-    });
+        .map_err(|_| "capture state is unavailable".to_owned())? = Some(capture);
     controls.show().map_err(|error| error.to_string())?;
     app.emit("recording://state-changed", next_state)
         .map_err(|error| error.to_string())?;
     Ok(next_state)
-}
-
-fn start_active_audio(
-    app: tauri::AppHandle,
-    config: AudioInputConfig,
-    output: frameflow_windows::WgcAudioInput,
-    timeline_origin_100ns: Option<u64>,
-) -> ActiveAudioCapture {
-    let mixer_config = frameflow_windows::AudioMixerConfig {
-        system: frameflow_windows::AudioSourceControl {
-            enabled: config.system_audio,
-            ..frameflow_windows::AudioSourceControl::default()
-        },
-        microphone: frameflow_windows::AudioSourceControl {
-            enabled: config.microphone,
-            ..frameflow_windows::AudioSourceControl::default()
-        },
-        ..frameflow_windows::AudioMixerConfig::default()
-    };
-    let mixer = Arc::new(Mutex::new(match timeline_origin_100ns {
-        Some(origin) => frameflow_windows::AudioMixer::with_origin(mixer_config, origin),
-        None => frameflow_windows::AudioMixer::new(mixer_config),
-    }));
-    let paused = Arc::new(AtomicBool::new(false));
-    let pause_offset_100ns = Arc::new(AtomicU64::new(0));
-    let warning = Arc::new(Mutex::new(None));
-    let callback_context = AudioCallbackContext {
-        mixer: Arc::clone(&mixer),
-        output: output.clone(),
-        paused: Arc::clone(&paused),
-        pause_offset_100ns: Arc::clone(&pause_offset_100ns),
-        warning: Arc::clone(&warning),
-        app: app.clone(),
-    };
-    let mut sources = Vec::new();
-    for (enabled, capture_source, source_id) in [
-        (
-            config.system_audio,
-            frameflow_windows::AudioCaptureSource::SystemOutput,
-            frameflow_windows::AudioSourceId::System,
-        ),
-        (
-            config.microphone,
-            frameflow_windows::AudioCaptureSource::Microphone,
-            frameflow_windows::AudioSourceId::Microphone,
-        ),
-    ] {
-        if !enabled {
-            continue;
-        }
-        match start_audio_source(capture_source, source_id, callback_context.clone()) {
-            Ok(source) => sources.push(source),
-            Err(error) => {
-                record_audio_error(&app, &warning, source_id, error.to_string());
-                if let Ok(mut mixer) = mixer.lock() {
-                    let mut control = mixer.source_control(source_id);
-                    control.enabled = false;
-                    mixer.set_source_control(source_id, control);
-                }
-            }
-        }
-    }
-    ActiveAudioCapture {
-        config,
-        sources,
-        mixer,
-        output,
-        paused,
-        pause_offset_100ns,
-        warning,
-    }
-}
-
-fn start_audio_source(
-    capture_source: frameflow_windows::AudioCaptureSource,
-    source_id: frameflow_windows::AudioSourceId,
-    context: AudioCallbackContext,
-) -> Result<ActiveAudioSource, frameflow_windows::PlatformError> {
-    let normalizer = Arc::new(Mutex::new(None::<frameflow_windows::AudioNormalizer>));
-    let callback_normalizer = Arc::clone(&normalizer);
-    let failed = Arc::new(AtomicBool::new(false));
-    let callback_failed = Arc::clone(&failed);
-    let mut callback_stopped = false;
-    let session = frameflow_windows::start_wasapi_capture(capture_source, move |result| {
-        if callback_stopped || context.paused.load(Ordering::Acquire) {
-            return;
-        }
-        let result = result.and_then(|mut packet| {
-            packet.qpc_position_100ns = packet
-                .qpc_position_100ns
-                .saturating_sub(context.pause_offset_100ns.load(Ordering::Acquire));
-            let chunk = {
-                let mut normalizer = callback_normalizer.lock().map_err(|_| {
-                    frameflow_windows::PlatformError::AudioCapture(
-                        "audio normalizer is unavailable".to_owned(),
-                    )
-                })?;
-                if normalizer.is_none() {
-                    *normalizer = Some(frameflow_windows::AudioNormalizer::new(packet.format)?);
-                }
-                normalizer
-                    .as_mut()
-                    .expect("audio normalizer was initialized")
-                    .push(&packet)?
-            };
-            let blocks = context
-                .mixer
-                .lock()
-                .map_err(|_| {
-                    frameflow_windows::PlatformError::AudioCapture(
-                        "audio mixer is unavailable".to_owned(),
-                    )
-                })?
-                .push(source_id, chunk);
-            for block in blocks {
-                context.output.submit(block)?;
-            }
-            Ok(())
-        });
-        if let Err(error) = result {
-            record_audio_error(&context.app, &context.warning, source_id, error.to_string());
-            if let Ok(mut mixer) = context.mixer.lock() {
-                let mut control = mixer.source_control(source_id);
-                control.enabled = false;
-                mixer.set_source_control(source_id, control);
-            }
-            callback_failed.store(true, Ordering::Release);
-            callback_stopped = true;
-        }
-    })?;
-    Ok(ActiveAudioSource {
-        id: source_id,
-        session,
-        normalizer,
-        failed,
-    })
-}
-
-fn audio_source_name(source: frameflow_windows::AudioSourceId) -> &'static str {
-    match source {
-        frameflow_windows::AudioSourceId::System => "systemAudio",
-        frameflow_windows::AudioSourceId::Microphone => "microphone",
-    }
-}
-
-fn record_audio_error(
-    app: &tauri::AppHandle,
-    warning: &Arc<Mutex<Option<String>>>,
-    source: frameflow_windows::AudioSourceId,
-    message: String,
-) {
-    let message = format!("音频已降级：{message}");
-    if let Ok(mut warning) = warning.lock() {
-        *warning = Some(message.clone());
-    }
-    let _ = app.emit(
-        "recording://audio-warning",
-        AudioWarningEvent {
-            source: audio_source_name(source),
-            message,
-        },
-    );
 }
 
 #[tauri::command]
@@ -953,16 +681,7 @@ fn pause_capture(
     let active = capture
         .as_mut()
         .ok_or_else(|| "capture session is unavailable".to_owned())?;
-    if let Some(audio) = active.audio.as_ref() {
-        audio.paused.store(true, Ordering::Release);
-    }
-    if let Err(error) = active.session.pause() {
-        if let Some(audio) = active.audio.as_ref() {
-            audio.paused.store(false, Ordering::Release);
-        }
-        return Err(error.to_string());
-    }
-    active.paused_at = Some(Instant::now());
+    active.pause()?;
     let next_state = state
         .recording
         .lock()
@@ -986,17 +705,7 @@ fn resume_capture(
     let active = capture
         .as_mut()
         .ok_or_else(|| "capture session is unavailable".to_owned())?;
-    active.session.resume().map_err(|error| error.to_string())?;
-    if let Some(paused_at) = active.paused_at.take() {
-        let paused_for = paused_at.elapsed();
-        active.paused_total += paused_for;
-        if let Some(audio) = active.audio.as_ref() {
-            audio
-                .pause_offset_100ns
-                .fetch_add(duration_to_100ns(paused_for), Ordering::AcqRel);
-            audio.paused.store(false, Ordering::Release);
-        }
-    }
+    active.resume()?;
     let next_state = state
         .recording
         .lock()
@@ -1010,61 +719,23 @@ fn resume_capture(
 
 #[tauri::command]
 fn get_capture_stats(state: State<'_, AppState>) -> Result<CaptureStats, String> {
-    let capture = state
+    let mut capture = state
         .capture
         .lock()
         .map_err(|_| "capture state is unavailable".to_owned())?;
     let active = capture
-        .as_ref()
+        .as_mut()
         .ok_or_else(|| "capture session is unavailable".to_owned())?;
-    let clock_end = active.paused_at.unwrap_or_else(Instant::now);
-    let elapsed = clock_end
-        .duration_since(active.started_at)
-        .saturating_sub(active.paused_total);
-    let last_error = active
-        .last_error
-        .lock()
-        .map_err(|_| "capture error state is unavailable".to_owned())?
-        .clone();
-    let audio = active.audio.as_ref().map(capture_audio_stats).transpose()?;
-    Ok(CaptureStats {
-        frame_count: active.frame_count.load(Ordering::Acquire),
-        elapsed_ms: elapsed.as_millis(),
-        paused: active.paused_at.is_some(),
-        last_error,
-        audio,
-    })
+    active.stats()
 }
 
-fn capture_audio_stats(audio: &ActiveAudioCapture) -> Result<CaptureAudioStats, String> {
-    let mixer = audio
-        .mixer
+#[tauri::command]
+fn get_recording_state(state: State<'_, AppState>) -> Result<RecordingState, String> {
+    state
+        .recording
         .lock()
-        .map_err(|_| "audio mixer is unavailable".to_owned())?;
-    let snapshot = |source, configured| {
-        let runtime = audio.sources.iter().find(|runtime| runtime.id == source);
-        LiveInputSnapshot {
-            enabled: configured,
-            muted: mixer.source_control(source).muted,
-            disconnected: configured
-                && runtime.is_none_or(|runtime| runtime.failed.load(Ordering::Acquire)),
-        }
-    };
-    Ok(CaptureAudioStats {
-        microphone: snapshot(
-            frameflow_windows::AudioSourceId::Microphone,
-            audio.config.microphone,
-        ),
-        system_audio: snapshot(
-            frameflow_windows::AudioSourceId::System,
-            audio.config.system_audio,
-        ),
-        warning: audio
-            .warning
-            .lock()
-            .map_err(|_| "audio warning state is unavailable".to_owned())?
-            .clone(),
-    })
+        .map_err(|_| "recording state is unavailable".to_owned())
+        .map(|recording| recording.state())
 }
 
 #[tauri::command]
@@ -1073,41 +744,19 @@ fn set_capture_audio_muted(
     source: String,
     muted: bool,
 ) -> Result<(), String> {
-    let capture = state
+    let mut capture = state
         .capture
         .lock()
         .map_err(|_| "capture state is unavailable".to_owned())?;
     let active = capture
-        .as_ref()
+        .as_mut()
         .ok_or_else(|| "capture session is unavailable".to_owned())?;
-    let audio = active
-        .audio
-        .as_ref()
-        .ok_or_else(|| "audio is not enabled for this recording".to_owned())?;
     let source = match source.as_str() {
-        "microphone" if audio.config.microphone => frameflow_windows::AudioSourceId::Microphone,
-        "systemAudio" if audio.config.system_audio => frameflow_windows::AudioSourceId::System,
-        "microphone" | "systemAudio" => {
-            return Err("audio input is not enabled for this recording".to_owned());
-        }
+        "microphone" => AudioInputSource::Microphone,
+        "systemAudio" => AudioInputSource::SystemAudio,
         _ => return Err("unknown audio input".to_owned()),
     };
-    if audio
-        .sources
-        .iter()
-        .find(|runtime| runtime.id == source)
-        .is_none_or(|runtime| runtime.failed.load(Ordering::Acquire))
-    {
-        return Err("audio input is disconnected".to_owned());
-    }
-    let mut mixer = audio
-        .mixer
-        .lock()
-        .map_err(|_| "audio mixer is unavailable".to_owned())?;
-    let mut control = mixer.source_control(source);
-    control.muted = muted;
-    mixer.set_source_control(source, control);
-    Ok(())
+    active.set_audio_muted(source, muted)
 }
 
 #[tauri::command]
@@ -1133,12 +782,12 @@ fn request_stop_capture(
     Ok(finalizing)
 }
 
-fn spawn_capture_finalizer(app: tauri::AppHandle, active: ActiveCapture) {
+fn spawn_capture_finalizer(app: tauri::AppHandle, active: CaptureWorkerClient) {
     let (sender, receiver) = mpsc::sync_channel(1);
     thread::Builder::new()
         .name("frameflow-mp4-finalize".to_owned())
         .spawn(move || {
-            let _ = sender.send(finalize_active_capture(active));
+            let _ = sender.send(active.finalize());
         })
         .expect("failed to start MP4 finalizer");
 
@@ -1157,71 +806,6 @@ fn spawn_capture_finalizer(app: tauri::AppHandle, active: ActiveCapture) {
         .expect("failed to start finalization coordinator");
 }
 
-fn finalize_active_capture(active: ActiveCapture) -> Result<FinalizedCapture, String> {
-    let ActiveCapture {
-        session,
-        audio,
-        started_at,
-        paused_at,
-        paused_total,
-        temporary_path,
-        output_path,
-        ..
-    } = active;
-    let clock_end = paused_at.unwrap_or_else(Instant::now);
-    let duration = clock_end
-        .duration_since(started_at)
-        .saturating_sub(paused_total);
-    if let Some(audio) = audio {
-        stop_active_audio(audio);
-    }
-    session.stop().map_err(|error| error.to_string())?;
-    fs::rename(&temporary_path, &output_path)
-        .map_err(|error| format!("failed to finalize recording file: {error}"))?;
-    Ok(FinalizedCapture {
-        output_path,
-        duration,
-    })
-}
-
-fn stop_active_audio(mut audio: ActiveAudioCapture) {
-    audio.paused.store(true, Ordering::Release);
-    for source in audio.sources.drain(..) {
-        let _ = source.session.stop();
-        let tail = source.normalizer.lock().ok().and_then(|mut normalizer| {
-            normalizer
-                .as_mut()
-                .map(frameflow_windows::AudioNormalizer::finish)
-        });
-        if let Some(tail) = tail.filter(|chunk| chunk.frames() > 0) {
-            if let Ok(mut mixer) = audio.mixer.lock() {
-                let blocks = mixer.push(source.id, tail);
-                submit_final_audio_blocks(&audio.output, blocks);
-            }
-        }
-    }
-    if let Ok(mut mixer) = audio.mixer.lock() {
-        let final_blocks = mixer.finish();
-        submit_final_audio_blocks(&audio.output, final_blocks);
-    }
-}
-
-fn submit_final_audio_blocks(
-    output: &frameflow_windows::WgcAudioInput,
-    blocks: Vec<frameflow_windows::MixedAudioBlock>,
-) {
-    for block in blocks {
-        let _ = output.submit_wait(block, Duration::from_millis(500));
-    }
-}
-
-fn duration_to_100ns(duration: Duration) -> u64 {
-    duration
-        .as_nanos()
-        .saturating_div(100)
-        .min(u128::from(u64::MAX)) as u64
-}
-
 fn complete_finalization(app: &tauri::AppHandle, result: Result<FinalizedCapture, String>) {
     let state = app.state::<AppState>();
     let event = match result {
@@ -1232,14 +816,10 @@ fn complete_finalization(app: &tauri::AppHandle, result: Result<FinalizedCapture
                 .and_then(|name| name.to_str())
                 .unwrap_or("FrameFlow recording.mp4")
                 .to_owned();
-            if let Ok(index) = state.recording_index.lock() {
-                if let Some(index) = index.as_ref() {
-                    if let Err(error) =
-                        index.record_completed(&finalized.output_path, finalized.duration)
-                    {
-                        eprintln!("failed to update recording index for {file_name}: {error}");
-                    }
-                }
+            if let Err(error) = recording_index(&state, app).and_then(|index| {
+                index.record_completed(&finalized.output_path, finalized.duration)
+            }) {
+                eprintln!("failed to update recording index for {file_name}: {error}");
             }
             if let Ok(mut recording) = state.recording.lock() {
                 if let Ok(processing) = recording.apply(RecordingAction::Finalized) {
@@ -1503,7 +1083,7 @@ fn load_output_config(app: &tauri::AppHandle) -> OutputConfig {
 
 fn normalize_loaded_output_config(config: OutputConfig) -> OutputConfig {
     let config = config.normalized();
-    if SUPPORTED_CAPTURE_FPS.contains(&config.main.fps) {
+    if SUPPORTED_CAPTURE_FPS.contains(&config.main.fps) && config.main.resolution.is_valid() {
         config
     } else {
         OutputConfig::default().normalized()
@@ -1532,6 +1112,21 @@ fn recording_index_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .app_config_dir()
         .map(|directory| directory.join("recordings.sqlite3"))
         .map_err(|error| error.to_string())
+}
+
+fn recording_index<'a>(
+    state: &'a AppState,
+    app: &tauri::AppHandle,
+) -> Result<&'a RecordingIndex, String> {
+    state
+        .recording_index
+        .get_or_init(|| {
+            let index = RecordingIndex::open(recording_index_path(app)?, save_directory())?;
+            index.reconcile()?;
+            Ok(index)
+        })
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
 fn load_audio_config(app: &tauri::AppHandle) -> AudioInputConfig {
@@ -1564,7 +1159,7 @@ pub fn run() {
             recording: Mutex::new(RecordingStateMachine::default()),
             selection: Mutex::new(None),
             capture: Mutex::new(None),
-            recording_index: Mutex::new(None),
+            recording_index: OnceLock::new(),
             native_selection: Mutex::new(None),
             output_config: Mutex::new(OutputConfig::default().normalized()),
             audio_config: Mutex::new(AudioInputConfig::default()),
@@ -1580,16 +1175,8 @@ pub fn run() {
                 .audio_config
                 .lock()
                 .expect("audio settings are unavailable") = audio_config;
-            let recording_index = RecordingIndex::open(
-                recording_index_path(app.handle()).map_err(std::io::Error::other)?,
-                save_directory(),
-            )
-            .map_err(std::io::Error::other)?;
-            recording_index.reconcile().map_err(std::io::Error::other)?;
-            *app.state::<AppState>()
-                .recording_index
-                .lock()
-                .expect("recording index is unavailable") = Some(recording_index);
+            recording_index(&app.state::<AppState>(), app.handle())
+                .map_err(std::io::Error::other)?;
             setup_tray(app)?;
             Ok(())
         })
@@ -1604,7 +1191,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_app_snapshot,
             open_recording_location,
-            set_capture_fps,
+            set_output_settings,
             set_audio_input,
             begin_selection,
             get_current_selection,
@@ -1615,6 +1202,7 @@ pub fn run() {
             start_capture,
             pause_capture,
             resume_capture,
+            get_recording_state,
             get_capture_stats,
             set_capture_audio_muted,
             request_stop_capture
@@ -1639,6 +1227,19 @@ mod tests {
         let mut config = OutputConfig::default();
         config.main.fps = 25;
         assert_eq!(normalize_loaded_output_config(config).main.fps, 30);
+    }
+
+    #[test]
+    fn rejects_invalid_persisted_output_resolution() {
+        let mut config = OutputConfig::default();
+        config.main.resolution = OutputResolution::FitWithin {
+            width: 0,
+            height: 1080,
+        };
+        assert_eq!(
+            normalize_loaded_output_config(config).main.resolution,
+            OutputResolution::Native
+        );
     }
 
     #[test]

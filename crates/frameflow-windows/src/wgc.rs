@@ -1,6 +1,6 @@
 use std::{
     path::{Path, PathBuf},
-    sync::mpsc,
+    sync::{mpsc, Arc, Mutex},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -41,13 +41,23 @@ use windows::{
 use frameflow_capture::{CaptureSession, PhysicalRect, RegionSelection};
 
 use crate::{
-    displays::monitor_for_display_id, graphics_capture_supported, media_foundation::Mp4Writer,
+    displays::monitor_for_display_id,
+    graphics_capture_supported,
+    media_foundation::{Mp4VideoConfig, Mp4Writer, VideoEncoderInfo},
     MixedAudioBlock, PlatformError,
 };
+
+const MAX_AUDIO_BLOCKS_PER_VIDEO_TICK: usize = 4;
+const MEDIA_CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const CROP_TEXTURE_POOL_SIZE: usize = 4;
+
+type SharedCaptureCallback =
+    Arc<Mutex<Box<dyn FnMut(Result<CapturedFrameInfo, PlatformError>) + Send>>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapturedFrameInfo {
     pub sequence: u64,
+    pub timeline_frame: u64,
     pub width: u32,
     pub height: u32,
     pub system_relative_time_100ns: i64,
@@ -57,6 +67,7 @@ pub struct CapturedFrameInfo {
 pub struct WgcCaptureSession {
     control: mpsc::Sender<WorkerControl>,
     audio: Option<WgcAudioInput>,
+    encoder: Option<VideoEncoderInfo>,
     worker: Option<JoinHandle<Result<(), PlatformError>>>,
 }
 
@@ -103,6 +114,7 @@ impl WgcAudioInput {
 pub struct Mp4CaptureOptions {
     frames_per_second: u32,
     audio_enabled: bool,
+    output_size: Option<(u32, u32)>,
 }
 
 impl Mp4CaptureOptions {
@@ -113,6 +125,7 @@ impl Mp4CaptureOptions {
         Ok(Self {
             frames_per_second,
             audio_enabled: false,
+            output_size: None,
         })
     }
 
@@ -128,6 +141,18 @@ impl Mp4CaptureOptions {
     pub fn audio_enabled(self) -> bool {
         self.audio_enabled
     }
+
+    pub fn with_output_size(mut self, width: u32, height: u32) -> Result<Self, PlatformError> {
+        if width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+            return Err(PlatformError::InvalidOutputSize { width, height });
+        }
+        self.output_size = Some((width, height));
+        Ok(self)
+    }
+
+    pub fn output_size(self, source_width: u32, source_height: u32) -> (u32, u32) {
+        self.output_size.unwrap_or((source_width, source_height))
+    }
 }
 
 impl Default for Mp4CaptureOptions {
@@ -135,6 +160,7 @@ impl Default for Mp4CaptureOptions {
         Self {
             frames_per_second: 30,
             audio_enabled: false,
+            output_size: None,
         }
     }
 }
@@ -155,6 +181,10 @@ impl WgcCaptureSession {
 
     pub fn audio_input(&self) -> Option<WgcAudioInput> {
         self.audio.clone()
+    }
+
+    pub fn video_encoder_info(&self) -> Option<VideoEncoderInfo> {
+        self.encoder.clone()
     }
 
     fn control(&self, action: WorkerAction) -> Result<(), PlatformError> {
@@ -231,6 +261,7 @@ impl Drop for WinRtApartment {
 struct OutputClock {
     frame_interval: Duration,
     next_deadline: Option<Instant>,
+    next_timeline_frame: u64,
 }
 
 impl OutputClock {
@@ -238,6 +269,7 @@ impl OutputClock {
         Self {
             frame_interval: Duration::from_secs_f64(1.0 / f64::from(frames_per_second)),
             next_deadline: None,
+            next_timeline_frame: 0,
         }
     }
 
@@ -259,22 +291,220 @@ impl OutputClock {
             .unwrap_or(maximum)
     }
 
+    #[cfg(test)]
     fn is_due(&self, now: Instant) -> bool {
         self.next_deadline.is_some_and(|deadline| now >= deadline)
     }
 
-    fn advance(&mut self) {
-        if let Some(deadline) = self.next_deadline {
-            self.next_deadline = Some(deadline + self.frame_interval);
+    fn take_due_frame(&mut self, now: Instant) -> Option<u64> {
+        let deadline = self.next_deadline?;
+        if now < deadline {
+            return None;
+        }
+        let missed =
+            now.duration_since(deadline).as_nanos() / self.frame_interval.as_nanos().max(1);
+        let missed = u64::try_from(missed).unwrap_or(u64::MAX);
+        let timeline_frame = self.next_timeline_frame.saturating_add(missed);
+        self.next_timeline_frame = timeline_frame.saturating_add(1);
+        let intervals = u32::try_from(missed.saturating_add(1)).unwrap_or(u32::MAX);
+        self.next_deadline = Some(deadline + self.frame_interval.saturating_mul(intervals));
+        Some(timeline_frame)
+    }
+}
+
+#[derive(Clone)]
+struct PreparedFrame {
+    texture: Arc<ID3D11Texture2D>,
+    width: u32,
+    height: u32,
+    system_relative_time_100ns: i64,
+}
+
+struct CropTexturePool {
+    textures: Vec<Arc<ID3D11Texture2D>>,
+    crop: PhysicalRect,
+}
+
+impl CropTexturePool {
+    fn new(device: &D3dDevice, crop: PhysicalRect) -> Result<Self, PlatformError> {
+        let textures = (0..CROP_TEXTURE_POOL_SIZE)
+            .map(|_| create_crop_texture(device, crop).map(Arc::new))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self { textures, crop })
+    }
+
+    fn copy_latest(
+        &self,
+        device: &D3dDevice,
+        source: &ID3D11Texture2D,
+    ) -> Option<Arc<ID3D11Texture2D>> {
+        let destination = self
+            .textures
+            .iter()
+            .find(|texture| Arc::strong_count(texture) == 1)?
+            .clone();
+        copy_crop(device, source, destination.as_ref(), self.crop);
+        Some(destination)
+    }
+}
+
+struct LatestValueState<T> {
+    generation: u64,
+    value: Option<T>,
+}
+
+struct LatestValue<T> {
+    state: Mutex<LatestValueState<T>>,
+}
+
+impl<T> Default for LatestValue<T> {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(LatestValueState {
+                generation: 0,
+                value: None,
+            }),
         }
     }
 }
 
-struct PreparedFrame {
-    texture: ID3D11Texture2D,
-    width: u32,
-    height: u32,
-    system_relative_time_100ns: i64,
+impl<T: Clone> LatestValue<T> {
+    fn publish(&self, value: T) -> Result<(), PlatformError> {
+        let mut state = self.state.lock().map_err(|_| {
+            PlatformError::WorkerUnavailable("latest video frame is unavailable".to_owned())
+        })?;
+        state.generation = state.generation.saturating_add(1);
+        state.value = Some(value);
+        Ok(())
+    }
+
+    fn latest_after(&self, generation: u64) -> Result<Option<(u64, T)>, PlatformError> {
+        let state = self.state.lock().map_err(|_| {
+            PlatformError::WorkerUnavailable("latest video frame is unavailable".to_owned())
+        })?;
+        if state.generation == generation {
+            Ok(None)
+        } else {
+            Ok(state
+                .value
+                .as_ref()
+                .map(|value| (state.generation, value.clone())))
+        }
+    }
+
+    fn has_value(&self) -> Result<bool, PlatformError> {
+        self.state
+            .lock()
+            .map(|state| state.value.is_some())
+            .map_err(|_| {
+                PlatformError::WorkerUnavailable("latest video frame is unavailable".to_owned())
+            })
+    }
+}
+
+struct MediaPipeline {
+    latest_frame: Arc<LatestValue<PreparedFrame>>,
+    control: mpsc::Sender<WorkerControl>,
+    encoder: VideoEncoderInfo,
+    worker: Option<JoinHandle<Result<(), PlatformError>>>,
+}
+
+impl MediaPipeline {
+    fn start(
+        output: Mp4Output,
+        selection: &RegionSelection,
+        device: &D3dDevice,
+        audio: Option<mpsc::Receiver<MixedAudioBlock>>,
+        callback: SharedCaptureCallback,
+        started: Instant,
+    ) -> Result<Self, PlatformError> {
+        let source_width = selection.capture_rect.width;
+        let source_height = selection.capture_rect.height;
+        let (output_width, output_height) = output.options.output_size(source_width, source_height);
+        let video = Mp4VideoConfig {
+            source_width,
+            source_height,
+            output_width,
+            output_height,
+            frame_rate: output.options.frames_per_second(),
+        };
+        let latest_frame = Arc::new(LatestValue::default());
+        let worker_latest_frame = Arc::clone(&latest_frame);
+        let (control, control_receiver) = mpsc::channel();
+        let (startup, startup_receiver) = mpsc::sync_channel(1);
+        let d3d11 = device.d3d11.clone();
+        let context = device.context.clone();
+        let worker = thread::Builder::new()
+            .name("frameflow-media".to_owned())
+            .spawn(move || {
+                run_media_worker(
+                    output,
+                    video,
+                    d3d11,
+                    context,
+                    worker_latest_frame,
+                    control_receiver,
+                    audio,
+                    callback,
+                    started,
+                    startup,
+                )
+            })
+            .map_err(|error| PlatformError::WorkerUnavailable(error.to_string()))?;
+        match startup_receiver.recv_timeout(Duration::from_secs(10)) {
+            Ok(Ok(encoder)) => Ok(Self {
+                latest_frame,
+                control,
+                encoder,
+                worker: Some(worker),
+            }),
+            Ok(Err(message)) => {
+                let _ = worker.join();
+                Err(PlatformError::WorkerUnavailable(message))
+            }
+            Err(_) => {
+                let _ = control.send(WorkerControl::Stop);
+                let _ = worker.join();
+                Err(PlatformError::WorkerUnavailable(
+                    "media worker did not start".to_owned(),
+                ))
+            }
+        }
+    }
+
+    fn publish(&self, frame: PreparedFrame) -> Result<(), PlatformError> {
+        self.latest_frame.publish(frame)
+    }
+
+    fn control(&self, action: WorkerAction) -> Result<(), PlatformError> {
+        let (acknowledge, receiver) = mpsc::sync_channel(1);
+        self.control
+            .send(WorkerControl::Action(action, acknowledge))
+            .map_err(|error| PlatformError::WorkerUnavailable(error.to_string()))?;
+        receiver
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| PlatformError::WorkerControlTimeout(action.label()))
+    }
+
+    fn is_finished(&self) -> bool {
+        self.worker.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+
+    fn shutdown(&mut self) -> Result<(), PlatformError> {
+        if let Some(worker) = self.worker.take() {
+            let _ = self.control.send(WorkerControl::Stop);
+            worker.join().map_err(|_| {
+                PlatformError::WorkerUnavailable("media worker panicked".to_owned())
+            })??;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for MediaPipeline {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
+    }
 }
 
 struct D3dDevice {
@@ -356,7 +586,7 @@ where
         .as_ref()
         .is_some_and(|output| output.options.audio_enabled())
     {
-        let (sender, receiver) = mpsc::sync_channel(8);
+        let (sender, receiver) = mpsc::sync_channel(64);
         (Some(WgcAudioInput { sender }), Some(receiver))
     } else {
         (None, None)
@@ -376,9 +606,10 @@ where
         .map_err(|error| PlatformError::WorkerUnavailable(error.to_string()))?;
 
     match startup_receiver.recv_timeout(Duration::from_secs(10)) {
-        Ok(Ok(())) => Ok(WgcCaptureSession {
+        Ok(Ok(encoder)) => Ok(WgcCaptureSession {
             control: control_sender,
             audio: audio_sender,
+            encoder,
             worker: Some(worker),
         }),
         Ok(Err(message)) => {
@@ -398,13 +629,13 @@ where
 fn run_capture_worker<F>(
     selection: RegionSelection,
     output: Option<Mp4Output>,
-    mut callback: F,
+    callback: F,
     control: mpsc::Receiver<WorkerControl>,
     audio: Option<mpsc::Receiver<MixedAudioBlock>>,
-    startup: mpsc::SyncSender<Result<(), String>>,
+    startup: mpsc::SyncSender<Result<Option<VideoEncoderInfo>, String>>,
 ) -> Result<(), PlatformError>
 where
-    F: FnMut(Result<CapturedFrameInfo, PlatformError>),
+    F: FnMut(Result<CapturedFrameInfo, PlatformError>) + Send + 'static,
 {
     if let Err(error) = unsafe { RoInitialize(RO_INIT_MULTITHREADED) } {
         let _ = startup.send(Err(error.to_string()));
@@ -431,6 +662,7 @@ where
             size.Height as u32,
         )?;
         let device = create_direct3d_device()?;
+        let crop_pool = CropTexturePool::new(&device, selection.capture_rect)?;
         let frame_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
             &device.winrt,
             DirectXPixelFormat::B8G8R8A8UIntNormalized,
@@ -438,38 +670,37 @@ where
             size,
         )?;
         let session = frame_pool.CreateCaptureSession(&item)?;
-        let writer = output
-            .as_ref()
-            .map(|output| {
-                if output.options.audio_enabled() {
-                    Mp4Writer::new_with_audio(
-                        &output.path,
-                        &device.d3d11,
-                        &device.context,
-                        selection.capture_rect.width,
-                        selection.capture_rect.height,
-                        output.options.frames_per_second(),
-                    )
-                } else {
-                    Mp4Writer::new(
-                        &output.path,
-                        &device.d3d11,
-                        &device.context,
-                        selection.capture_rect.width,
-                        selection.capture_rect.height,
-                        output.options.frames_per_second(),
-                    )
-                }
-            })
-            .transpose()?;
-        Ok((device, frame_pool, session, size, writer))
+        Ok((device, frame_pool, session, size, crop_pool))
     })();
-    let (device, frame_pool, session, mut expected_size, mut writer) = match setup {
+    let (device, frame_pool, session, mut expected_size, crop_pool) = match setup {
         Ok(resources) => resources,
         Err(error) => {
             let _ = startup.send(Err(error.to_string()));
             return Err(error);
         }
+    };
+
+    let started = Instant::now();
+    let callback: SharedCaptureCallback = Arc::new(Mutex::new(Box::new(callback)));
+    let (mut media, encoder) = match output {
+        Some(output) => match MediaPipeline::start(
+            output,
+            &selection,
+            &device,
+            audio,
+            Arc::clone(&callback),
+            started,
+        ) {
+            Ok(media) => {
+                let encoder = media.encoder.clone();
+                (Some(media), Some(encoder))
+            }
+            Err(error) => {
+                let _ = startup.send(Err(error.to_string()));
+                return Err(error);
+            }
+        },
+        None => (None, None),
     };
 
     let (frame_sender, frame_receiver) = mpsc::sync_channel(2);
@@ -484,31 +715,19 @@ where
         let _ = startup.send(Err(error.to_string()));
         return Err(error.into());
     }
-    let _ = startup.send(Ok(()));
+    let _ = startup.send(Ok(encoder));
 
-    let started = Instant::now();
     let mut paused = false;
     let mut sequence = 0;
-    let output_fps = output
-        .as_ref()
-        .map(|output| output.options.frames_per_second())
-        .unwrap_or(30);
-    let mut output_clock = OutputClock::new(output_fps);
-    let mut latest_frame: Option<PreparedFrame> = None;
     let mut stopping = false;
-    let mut fatal_media_error = None;
     while !stopping {
         while let Ok(command) = control.try_recv() {
             match command {
                 WorkerControl::Action(action, acknowledge) => {
-                    paused = matches!(action, WorkerAction::Pause);
-                    match action {
-                        WorkerAction::Pause => output_clock.pause(),
-                        WorkerAction::Resume if latest_frame.is_some() => {
-                            output_clock.resume(Instant::now())
-                        }
-                        WorkerAction::Resume => {}
+                    if let Some(media) = media.as_ref() {
+                        media.control(action)?;
                     }
+                    paused = matches!(action, WorkerAction::Pause);
                     let _ = acknowledge.send(());
                 }
                 WorkerControl::Stop => stopping = true,
@@ -517,36 +736,28 @@ where
         if stopping {
             break;
         }
-
-        if let (Some(writer), Some(audio)) = (writer.as_mut(), audio.as_ref()) {
-            if let Err(error) = drain_audio_blocks(writer, audio) {
-                let message = error.to_string();
-                callback(Err(PlatformError::MediaFoundation(message.clone())));
-                fatal_media_error = Some(message);
-                break;
-            }
+        if media.as_ref().is_some_and(MediaPipeline::is_finished) {
+            break;
         }
 
-        let wait = if writer.is_some() && !paused && latest_frame.is_some() {
-            output_clock.wait_duration(Instant::now(), Duration::from_millis(20))
-        } else {
-            Duration::from_millis(20)
-        };
-        match frame_receiver.recv_timeout(wait) {
+        match frame_receiver.recv_timeout(Duration::from_millis(20)) {
             Ok(()) => {
                 let frame = match frame_pool.TryGetNextFrame() {
                     Ok(frame) => frame,
                     Err(error) => {
-                        callback(Err(error.into()));
+                        emit_capture_callback(&callback, Err(error.into()));
                         continue;
                     }
                 };
                 let content_size = frame.ContentSize()?;
                 if content_size.Width <= 0 || content_size.Height <= 0 {
-                    callback(Err(PlatformError::InvalidFrameSize {
-                        width: content_size.Width,
-                        height: content_size.Height,
-                    }));
+                    emit_capture_callback(
+                        &callback,
+                        Err(PlatformError::InvalidFrameSize {
+                            width: content_size.Width,
+                            height: content_size.Height,
+                        }),
+                    );
                     continue;
                 }
                 if content_size != expected_size {
@@ -556,7 +767,7 @@ where
                         content_size.Width as u32,
                         content_size.Height as u32,
                     ) {
-                        callback(Err(error));
+                        emit_capture_callback(&callback, Err(error));
                         break;
                     }
                     frame_pool.Recreate(
@@ -568,59 +779,210 @@ where
                     expected_size = content_size;
                     continue;
                 }
-                let prepared = prepare_frame(&frame, &device, Some(selection.capture_rect))?;
-                if writer.is_some() {
-                    latest_frame = Some(prepared);
-                    if !paused && output_clock.next_deadline.is_none() {
-                        output_clock.start(Instant::now());
-                    }
+                let Some(prepared) = prepare_frame(
+                    &frame,
+                    &device,
+                    Some(selection.capture_rect),
+                    Some(&crop_pool),
+                )?
+                else {
+                    continue;
+                };
+                if let Some(media) = media.as_ref() {
+                    media.publish(prepared)?;
                 } else if !paused {
                     sequence += 1;
-                    callback(Ok(frame_info(&prepared, started, sequence)));
+                    emit_capture_callback(
+                        &callback,
+                        Ok(frame_info(
+                            &prepared,
+                            started,
+                            sequence,
+                            sequence.saturating_sub(1),
+                        )),
+                    );
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-
-        if !paused && output_clock.is_due(Instant::now()) {
-            if let (Some(writer), Some(frame)) = (writer.as_mut(), latest_frame.as_ref()) {
-                sequence += 1;
-                match writer.write_texture(&frame.texture) {
-                    Ok(()) => callback(Ok(frame_info(frame, started, sequence))),
-                    Err(error) => {
-                        let message = error.to_string();
-                        callback(Err(PlatformError::MediaFoundation(message.clone())));
-                        fatal_media_error = Some(message);
-                        break;
-                    }
-                }
-                output_clock.advance();
-            }
         }
     }
 
     frame_pool.RemoveFrameArrived(token)?;
     session.Close()?;
     frame_pool.Close()?;
-    if let Some(message) = fatal_media_error {
-        return Err(PlatformError::MediaFoundation(message));
-    }
-    if let (Some(writer), Some(audio)) = (writer.as_mut(), audio.as_ref()) {
-        drain_audio_blocks(writer, audio)?;
-    }
-    if let Some(writer) = writer {
-        writer.finalize()?;
+    if let Some(media) = media.as_mut() {
+        media.shutdown()?;
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_media_worker(
+    output: Mp4Output,
+    video: Mp4VideoConfig,
+    device: ID3D11Device,
+    context: ID3D11DeviceContext,
+    latest_frame: Arc<LatestValue<PreparedFrame>>,
+    control: mpsc::Receiver<WorkerControl>,
+    audio: Option<mpsc::Receiver<MixedAudioBlock>>,
+    callback: SharedCaptureCallback,
+    started: Instant,
+    startup: mpsc::SyncSender<Result<VideoEncoderInfo, String>>,
+) -> Result<(), PlatformError> {
+    if let Err(error) = unsafe { RoInitialize(RO_INIT_MULTITHREADED) } {
+        let _ = startup.send(Err(error.to_string()));
+        return Err(error.into());
+    }
+    let _apartment = WinRtApartment;
+    let writer = if output.options.audio_enabled() {
+        Mp4Writer::new_with_audio(&output.path, &device, &context, video)
+    } else {
+        Mp4Writer::new(&output.path, &device, &context, video)
+    };
+    let mut writer = match writer {
+        Ok(writer) => writer,
+        Err(error) => {
+            let _ = startup.send(Err(error.to_string()));
+            return Err(error);
+        }
+    };
+    let _ = startup.send(Ok(writer.encoder_info()));
+
+    let recording_result = run_media_loop(
+        &mut writer,
+        video.frame_rate,
+        &latest_frame,
+        &control,
+        audio.as_ref(),
+        &callback,
+        started,
+    );
+    if let Err(error) = &recording_result {
+        emit_capture_callback(
+            &callback,
+            Err(PlatformError::MediaFoundation(error.to_string())),
+        );
+    }
+    let finalize_result = writer.finalize();
+    recording_result.and(finalize_result)
+}
+
+fn run_media_loop(
+    writer: &mut Mp4Writer,
+    frame_rate: u32,
+    latest_frame: &LatestValue<PreparedFrame>,
+    control: &mpsc::Receiver<WorkerControl>,
+    audio: Option<&mpsc::Receiver<MixedAudioBlock>>,
+    callback: &SharedCaptureCallback,
+    started: Instant,
+) -> Result<(), PlatformError> {
+    let mut output_clock = OutputClock::new(frame_rate);
+    let mut paused = false;
+    let mut stopping = false;
+    let mut generation = 0;
+    let mut current_frame = None;
+    let mut sequence = 0;
+
+    while !stopping {
+        let wait = if !paused && current_frame.is_some() {
+            output_clock.wait_duration(Instant::now(), MEDIA_CONTROL_POLL_INTERVAL)
+        } else {
+            MEDIA_CONTROL_POLL_INTERVAL
+        };
+        match control.recv_timeout(wait) {
+            Ok(WorkerControl::Action(action, acknowledge)) => {
+                paused = matches!(action, WorkerAction::Pause);
+                match action {
+                    WorkerAction::Pause => output_clock.pause(),
+                    WorkerAction::Resume if latest_frame.has_value()? => {
+                        output_clock.resume(Instant::now())
+                    }
+                    WorkerAction::Resume => {}
+                }
+                let _ = acknowledge.send(());
+            }
+            Ok(WorkerControl::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                stopping = true;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        if stopping {
+            break;
+        }
+
+        if let Some((next_generation, frame)) = latest_frame.latest_after(generation)? {
+            generation = next_generation;
+            current_frame = Some(frame);
+            if !paused && output_clock.next_deadline.is_none() {
+                output_clock.start(Instant::now());
+            }
+        }
+        if let Some(audio) = audio {
+            drain_audio_blocks(writer, audio, Some(MAX_AUDIO_BLOCKS_PER_VIDEO_TICK))?;
+        }
+        if !paused {
+            if let (Some(frame), Some(timeline_frame)) = (
+                current_frame.as_ref(),
+                output_clock.take_due_frame(Instant::now()),
+            ) {
+                sequence += 1;
+                writer.write_texture(frame.texture.as_ref(), timeline_frame)?;
+                emit_capture_callback(
+                    callback,
+                    Ok(frame_info(frame, started, sequence, timeline_frame)),
+                );
+            }
+        }
+    }
+
+    if !paused {
+        if let (Some(frame), Some(timeline_frame)) = (
+            current_frame.as_ref(),
+            output_clock.take_due_frame(Instant::now()),
+        ) {
+            sequence += 1;
+            writer.write_texture(frame.texture.as_ref(), timeline_frame)?;
+            emit_capture_callback(
+                callback,
+                Ok(frame_info(frame, started, sequence, timeline_frame)),
+            );
+        }
+    }
+    if let Some(audio) = audio {
+        drain_audio_blocks(writer, audio, None)?;
+    }
+    Ok(())
+}
+
+fn emit_capture_callback(
+    callback: &SharedCaptureCallback,
+    result: Result<CapturedFrameInfo, PlatformError>,
+) {
+    if let Ok(mut callback) = callback.lock() {
+        callback(result);
+    }
 }
 
 fn drain_audio_blocks(
     writer: &mut Mp4Writer,
     receiver: &mpsc::Receiver<MixedAudioBlock>,
+    maximum_blocks: Option<usize>,
 ) -> Result<(), PlatformError> {
-    while let Ok(block) = receiver.try_recv() {
-        writer.write_audio_block(&block)?;
+    match maximum_blocks {
+        Some(maximum_blocks) => {
+            for _ in 0..maximum_blocks {
+                let Ok(block) = receiver.try_recv() else {
+                    break;
+                };
+                writer.write_audio_block(&block)?;
+            }
+        }
+        None => {
+            while let Ok(block) = receiver.try_recv() {
+                writer.write_audio_block(&block)?;
+            }
+        }
     }
     Ok(())
 }
@@ -736,18 +1098,26 @@ fn inspect_frame(
     sequence: u64,
     writer: Option<&mut Mp4Writer>,
 ) -> Result<CapturedFrameInfo, PlatformError> {
-    let prepared = prepare_frame(frame, device, crop)?;
+    let prepared = prepare_frame(frame, device, crop, None)?.ok_or_else(|| {
+        PlatformError::WorkerUnavailable("capture texture pool is exhausted".to_owned())
+    })?;
     if let Some(writer) = writer {
-        writer.write_texture(&prepared.texture)?;
+        writer.write_texture(prepared.texture.as_ref(), sequence.saturating_sub(1))?;
     }
-    Ok(frame_info(&prepared, started, sequence))
+    Ok(frame_info(
+        &prepared,
+        started,
+        sequence,
+        sequence.saturating_sub(1),
+    ))
 }
 
 fn prepare_frame(
     frame: &Direct3D11CaptureFrame,
     device: &D3dDevice,
     crop: Option<PhysicalRect>,
-) -> Result<PreparedFrame, PlatformError> {
+    crop_pool: Option<&CropTexturePool>,
+) -> Result<Option<PreparedFrame>, PlatformError> {
     let size = frame.ContentSize()?;
     if size.Width <= 0 || size.Height <= 0 {
         return Err(PlatformError::InvalidFrameSize {
@@ -761,24 +1131,38 @@ fn prepare_frame(
     let source_texture: ID3D11Texture2D = unsafe { access.GetInterface()? };
     let (width, height, texture) = if let Some(crop) = crop {
         validate_crop(crop, size.Width as u32, size.Height as u32)?;
-        let cropped = crop_texture(device, &source_texture, crop)?;
-        let mut description = D3D11_TEXTURE2D_DESC::default();
-        unsafe { cropped.GetDesc(&mut description) };
-        (description.Width, description.Height, cropped)
+        let cropped = match crop_pool {
+            Some(pool) => pool.copy_latest(device, &source_texture),
+            None => Some(Arc::new(crop_texture(device, &source_texture, crop)?)),
+        };
+        let Some(cropped) = cropped else {
+            return Ok(None);
+        };
+        (crop.width, crop.height, cropped)
     } else {
-        (size.Width as u32, size.Height as u32, source_texture)
+        (
+            size.Width as u32,
+            size.Height as u32,
+            Arc::new(source_texture),
+        )
     };
-    Ok(PreparedFrame {
+    Ok(Some(PreparedFrame {
         texture,
         width,
         height,
         system_relative_time_100ns: frame.SystemRelativeTime()?.Duration,
-    })
+    }))
 }
 
-fn frame_info(frame: &PreparedFrame, started: Instant, sequence: u64) -> CapturedFrameInfo {
+fn frame_info(
+    frame: &PreparedFrame,
+    started: Instant,
+    sequence: u64,
+    timeline_frame: u64,
+) -> CapturedFrameInfo {
     CapturedFrameInfo {
         sequence,
+        timeline_frame,
         width: frame.width,
         height: frame.height,
         system_relative_time_100ns: frame.system_relative_time_100ns,
@@ -818,6 +1202,15 @@ fn crop_texture(
     source: &ID3D11Texture2D,
     crop: PhysicalRect,
 ) -> Result<ID3D11Texture2D, PlatformError> {
+    let destination = create_crop_texture(device, crop)?;
+    copy_crop(device, source, &destination, crop);
+    Ok(destination)
+}
+
+fn create_crop_texture(
+    device: &D3dDevice,
+    crop: PhysicalRect,
+) -> Result<ID3D11Texture2D, PlatformError> {
     let description = D3D11_TEXTURE2D_DESC {
         Width: crop.width,
         Height: crop.height,
@@ -839,7 +1232,15 @@ fn crop_texture(
             .d3d11
             .CreateTexture2D(&description, None, Some(&mut destination))?;
     }
-    let destination = destination.ok_or_else(windows::core::Error::from_win32)?;
+    destination.ok_or_else(|| windows::core::Error::from_win32().into())
+}
+
+fn copy_crop(
+    device: &D3dDevice,
+    source: &ID3D11Texture2D,
+    destination: &ID3D11Texture2D,
+    crop: PhysicalRect,
+) {
     let source_box = D3D11_BOX {
         left: crop.x as u32,
         top: crop.y as u32,
@@ -849,19 +1250,11 @@ fn crop_texture(
         back: 1,
     };
     unsafe {
-        device.context.CopySubresourceRegion(
-            &destination,
-            0,
-            0,
-            0,
-            0,
-            source,
-            0,
-            Some(&source_box),
-        );
+        device
+            .context
+            .CopySubresourceRegion(destination, 0, 0, 0, 0, source, 0, Some(&source_box));
         device.context.Flush();
     }
-    Ok(destination)
 }
 
 fn close_capture(session: &GraphicsCaptureSession, frame_pool: &Direct3D11CaptureFramePool) {
@@ -916,10 +1309,37 @@ mod tests {
         let started = Instant::now();
         let mut clock = OutputClock::new(30);
         clock.start(started);
-        assert!(clock.is_due(started));
-        clock.advance();
+        assert_eq!(clock.take_due_frame(started), Some(0));
         assert!(!clock.is_due(started + Duration::from_micros(33_332)));
         assert!(clock.is_due(started + Duration::from_micros(33_334)));
+    }
+
+    #[test]
+    fn output_clock_skips_timeline_frames_when_encoding_falls_behind() {
+        let started = Instant::now();
+        let mut clock = OutputClock::new(60);
+        clock.start(started);
+
+        assert_eq!(clock.take_due_frame(started), Some(0));
+        assert_eq!(
+            clock.take_due_frame(started + Duration::from_millis(105)),
+            Some(6)
+        );
+        assert_eq!(
+            clock.take_due_frame(started + Duration::from_millis(205)),
+            Some(12)
+        );
+    }
+
+    #[test]
+    fn latest_value_mailbox_overwrites_backlog_instead_of_blocking_capture() {
+        let mailbox = LatestValue::default();
+        mailbox.publish(10_u32).unwrap();
+        mailbox.publish(20_u32).unwrap();
+        mailbox.publish(30_u32).unwrap();
+
+        assert_eq!(mailbox.latest_after(0).unwrap(), Some((3, 30)));
+        assert_eq!(mailbox.latest_after(3).unwrap(), None);
     }
 
     #[test]
@@ -953,11 +1373,26 @@ mod tests {
     }
 
     #[test]
+    fn mp4_options_require_encoder_safe_output_dimensions() {
+        let options = Mp4CaptureOptions::new(60)
+            .unwrap()
+            .with_output_size(2194, 1234)
+            .unwrap();
+        assert_eq!(options.output_size(3840, 2160), (2194, 1234));
+        assert!(matches!(
+            Mp4CaptureOptions::new(60)
+                .unwrap()
+                .with_output_size(2195, 1234),
+            Err(PlatformError::InvalidOutputSize { .. })
+        ));
+    }
+
+    #[test]
     fn output_clock_uses_the_configured_frame_rate() {
         let started = Instant::now();
         let mut clock = OutputClock::new(60);
         clock.start(started);
-        clock.advance();
+        assert_eq!(clock.take_due_frame(started), Some(0));
         assert!(!clock.is_due(started + Duration::from_micros(16_665)));
         assert!(clock.is_due(started + Duration::from_micros(16_667)));
     }

@@ -25,28 +25,37 @@ export function RecordingControls() {
     let unlisten: (() => void) | undefined;
     let unlistenAudio: (() => void) | undefined;
     let unlistenExitBlocked: (() => void) | undefined;
-    void listen<RecordingState>("recording://state-changed", (event) => {
-      setPhase(event.payload);
-      if (event.payload === "recording") {
-        setStats(null);
-        setError(null);
-        setAudioWarning(null);
+    void Promise.all([
+      listen<RecordingState>("recording://state-changed", (event) => {
+        setPhase(event.payload);
+        if (event.payload === "recording") {
+          setStats(null);
+          setError(null);
+          setAudioWarning(null);
+        }
+      }),
+      listen<AudioWarningEvent>("recording://audio-warning", (event) => {
+        setAudioWarning(event.payload.message);
+      }),
+      listen<string>("recording://exit-blocked", (event) => {
+        setError(event.payload);
+      }),
+    ]).then(async ([disposeState, disposeAudio, disposeExitBlocked]) => {
+      if (disposed) {
+        disposeState();
+        disposeAudio();
+        disposeExitBlocked();
+        return;
       }
-    }).then((dispose) => {
-      if (disposed) dispose();
-      else unlisten = dispose;
-    });
-    void listen<AudioWarningEvent>("recording://audio-warning", (event) => {
-      setAudioWarning(event.payload.message);
-    }).then((dispose) => {
-      if (disposed) dispose();
-      else unlistenAudio = dispose;
-    });
-    void listen<string>("recording://exit-blocked", (event) => {
-      setError(event.payload);
-    }).then((dispose) => {
-      if (disposed) dispose();
-      else unlistenExitBlocked = dispose;
+      unlisten = disposeState;
+      unlistenAudio = disposeAudio;
+      unlistenExitBlocked = disposeExitBlocked;
+      try {
+        const current = await invoke<RecordingState>("get_recording_state");
+        if (!disposed) setPhase(current);
+      } catch (cause) {
+        if (!disposed) setError(`无法读取录制状态：${String(cause)}`);
+      }
     });
     return () => {
       disposed = true;
@@ -58,17 +67,27 @@ export function RecordingControls() {
 
   useEffect(() => {
     if (phase !== "recording" && phase !== "paused") return;
-    const refresh = () => {
-      void invoke<CaptureStats>("get_capture_stats")
-        .then((next) => {
-          setStats(next);
-          setPhase(next.paused ? "paused" : "recording");
-        })
-        .catch(() => undefined);
+    let disposed = false;
+    let timer: number | undefined;
+    const refresh = async () => {
+      try {
+        const next = await invoke<CaptureStats>("get_capture_stats");
+        if (disposed) return;
+        setStats(next);
+        setPhase(next.paused ? "paused" : "recording");
+        setError(null);
+      } catch (cause) {
+        if (disposed) return;
+        setError(`录制进程状态不可用：${String(cause)}`);
+        return;
+      }
+      if (!disposed) timer = window.setTimeout(refresh, 250);
     };
-    refresh();
-    const timer = window.setInterval(refresh, 250);
-    return () => window.clearInterval(timer);
+    void refresh();
+    return () => {
+      disposed = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
   }, [phase]);
 
   const togglePause = async () => {
@@ -111,13 +130,23 @@ export function RecordingControls() {
 
   const systemAudio = stats?.audio?.systemAudio;
   const microphone = stats?.audio?.microphone;
+  const encoderLabel = stats?.videoEncoder.hardwareAccelerated === true
+    ? "硬件 H.264"
+    : stats?.videoEncoder.hardwareAccelerated === false
+      ? "软件 H.264"
+      : "H.264";
 
   return (
     <main className="recording-controls-shell">
       <div className="recording-controls-bar">
         <span className="recording-state"><i />{stopping ? "正在保存" : phase === "paused" ? "已暂停" : "录制中"}</span>
         <strong>{formatElapsed(stats?.elapsedMs ?? 0)}</strong>
-        <small>{stats?.frameCount ?? 0} 帧 · {stats?.audio ? "H.264/AAC" : "H.264"} MP4</small>
+        <small title={stats?.videoEncoder.name}>
+          {stats?.frameCount ?? 0} 帧 · {(stats?.effectiveFps ?? 0).toFixed(1)} FPS
+          {(stats?.droppedFrames ?? 0) > 0 ? ` · 丢 ${stats?.droppedFrames} 帧` : ""}
+          {(stats?.audio?.droppedPackets ?? 0) > 0 ? ` · 音频丢 ${stats?.audio?.droppedPackets} 包` : ""}
+          {` · ${encoderLabel}${stats?.audio ? "/AAC" : ""} MP4`}
+        </small>
         {systemAudio?.enabled && (
           <button className={`audio-control ${systemAudio.muted ? "muted" : ""}`} disabled={stopping || systemAudio.disconnected} title={systemAudio.disconnected ? "系统声音设备已断开" : systemAudio.muted ? "恢复系统声音" : "静音系统声音"} onClick={() => void toggleMute("systemAudio", systemAudio)}>
             {systemAudio.muted || systemAudio.disconnected ? <VolumeX size={15} /> : <Volume2 size={15} />}

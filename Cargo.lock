@@ -856,6 +856,7 @@ version = "0.1.0"
 dependencies = [
  "frameflow-capture",
  "frameflow-core",
+ "frameflow-recorder",
  "frameflow-windows",
  "rusqlite",
  "serde",
@@ -878,6 +879,18 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "frameflow-recorder"
+version = "0.1.0"
+dependencies = [
+ "frameflow-capture",
+ "frameflow-windows",
+ "serde",
+ "serde_json",
+ "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
