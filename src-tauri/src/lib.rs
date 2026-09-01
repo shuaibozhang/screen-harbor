@@ -23,13 +23,14 @@ use frameflow_core::{
     OutputConfig, OutputFormat, OutputResolution, RecordingAction, RecordingState,
     RecordingStateMachine, Resolution,
 };
-use frameflow_media::{CoverJob, MediaJob, MediaWorkerClient, PreviewJob};
+use frameflow_media::{CoverJob, MediaJob, MediaWorkerClient, PreviewFormat, PreviewJob};
 use frameflow_recorder::{
     AudioInputConfig, AudioInputSource, CaptureEngineEvent, CaptureOutputSize, CaptureStats,
     CaptureWorkerClient, FinalizedCapture,
 };
 use recording_index::{
-    CoverJobSpec, PreviewJobSpec, RecordingDetails, RecordingIndex, RecordingSummary,
+    CoverJobSpec, PreviewJobSpec, PreviewProfile, RecordingDetails, RecordingIndex,
+    RecordingSummary,
 };
 use recording_recovery::{
     interrupted_group_for_id, interrupted_recordings, recover_publishable_recordings,
@@ -151,6 +152,8 @@ struct AppSnapshot {
     output_summary: String,
     capture_fps: u16,
     output_resolution: OutputResolution,
+    preview_format: OutputFormat,
+    preview_resolution: OutputResolution,
     supported_capture_fps: [u16; 3],
     monitor_refresh_rate_hz: Option<u32>,
     recommended_capture_fps: u16,
@@ -296,6 +299,11 @@ fn get_app_snapshot(
         .clone();
     let capture_fps = output_config.main.fps;
     let output_resolution = output_config.main.resolution;
+    let preview = output_config.preview.clone().unwrap_or_else(|| {
+        OutputConfig::default()
+            .preview
+            .expect("default preview profile")
+    });
     let (displays, selected_display) = capture_displays(&app, &state)?;
     let monitor_refresh_rate_hz = selected_display.refresh_rate_hz;
     let recommended_capture_fps = recommended_capture_fps(monitor_refresh_rate_hz);
@@ -332,11 +340,16 @@ fn get_app_snapshot(
             device_name: audio_endpoints.system_output.map(|endpoint| endpoint.name),
         },
         output_summary: format!(
-            "MP4 · {codec_label} · {} · {capture_fps} FPS · {audio_label}",
-            output_resolution_label(output_resolution)
+            "母版 MP4 · {codec_label} · {} · {capture_fps} FPS · {audio_label} / 预览 {} · {} · {} FPS",
+            output_resolution_label(output_resolution),
+            output_format_label(preview.format),
+            output_resolution_label(preview.resolution),
+            preview.fps,
         ),
         capture_fps,
         output_resolution,
+        preview_format: preview.format,
+        preview_resolution: preview.resolution,
         supported_capture_fps: SUPPORTED_CAPTURE_FPS,
         monitor_refresh_rate_hz,
         recommended_capture_fps,
@@ -676,18 +689,66 @@ fn output_resolution_label(resolution: OutputResolution) -> String {
     }
 }
 
+fn output_format_label(format: OutputFormat) -> &'static str {
+    match format {
+        OutputFormat::Mp4 => "MP4",
+        OutputFormat::Webm => "WebM",
+        OutputFormat::Mov => "MOV",
+        OutputFormat::AnimatedWebp => "WebP",
+        OutputFormat::AnimatedAvif => "AVIF",
+    }
+}
+
+fn preview_profile(config: &OutputConfig) -> PreviewProfile {
+    let fallback = OutputConfig::default();
+    let preview = config
+        .preview
+        .as_ref()
+        .or(fallback.preview.as_ref())
+        .expect("default output config has a preview profile");
+    let (maximum_width, maximum_height) = match preview.resolution {
+        OutputResolution::FitWithin { width, height } => (width, height),
+        OutputResolution::Native => (854, 480),
+    };
+    PreviewProfile {
+        format: match preview.format {
+            OutputFormat::Webm => PreviewFormat::Webm,
+            _ => PreviewFormat::Mp4,
+        },
+        maximum_width,
+        maximum_height,
+        frames_per_second: preview.fps,
+        include_audio: preview.include_audio,
+    }
+}
+
 #[tauri::command]
 fn set_output_settings(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     fps: u16,
     resolution: OutputResolution,
+    preview_format: OutputFormat,
+    preview_resolution: OutputResolution,
 ) -> Result<(), String> {
     if !SUPPORTED_CAPTURE_FPS.contains(&fps) {
         return Err(format!("unsupported capture frame rate: {fps} FPS"));
     }
     if !resolution.is_valid() {
         return Err("output resolution must be at least 2×2".to_owned());
+    }
+    if !matches!(preview_format, OutputFormat::Mp4 | OutputFormat::Webm) {
+        return Err("preview format must be MP4 or WebM".to_owned());
+    }
+    let OutputResolution::FitWithin {
+        width: preview_width,
+        height: preview_height,
+    } = preview_resolution
+    else {
+        return Err("preview resolution must use a maximum width and height".to_owned());
+    };
+    if preview_width < 2 || preview_height < 2 || preview_width > 3840 || preview_height > 2160 {
+        return Err("preview resolution must be between 2×2 and 3840×2160".to_owned());
     }
     if state
         .recording
@@ -706,6 +767,10 @@ fn set_output_settings(
         .clone();
     next.main.fps = fps;
     next.main.resolution = resolution;
+    if let Some(preview) = &mut next.preview {
+        preview.format = preview_format;
+        preview.resolution = preview_resolution;
+    }
     next = next.normalized();
     save_output_config(&app, &next)?;
     *state
@@ -1345,6 +1410,11 @@ fn complete_finalization(app: &tauri::AppHandle, result: Result<FinalizedCapture
                 .and_then(|name| name.to_str())
                 .unwrap_or("FrameFlow recording.mp4")
                 .to_owned();
+            let frozen_preview_profile = state
+                .output_config
+                .lock()
+                .map(|config| preview_profile(&config))
+                .unwrap_or_default();
             let recording_id = match recording_index(&state, app).and_then(|index| {
                 index.record_completed(
                     &finalized.output_path,
@@ -1354,6 +1424,7 @@ fn complete_finalization(app: &tauri::AppHandle, result: Result<FinalizedCapture
                         height: finalized.output_size.height,
                     },
                     finalized.frames_per_second.min(u32::from(u16::MAX)) as u16,
+                    frozen_preview_profile,
                 )
             }) {
                 Ok(recording_id) => {
@@ -1464,10 +1535,11 @@ fn run_media_scheduler(app: tauri::AppHandle, receiver: mpsc::Receiver<MediaJobS
                 input_path: job.input_path.clone(),
                 temporary_path: job.temporary_path.clone(),
                 output_path: job.output_path.clone(),
-                maximum_width: 854,
-                maximum_height: 480,
-                frames_per_second: 15,
-                include_audio: true,
+                format: job.profile.format,
+                maximum_width: job.profile.maximum_width,
+                maximum_height: job.profile.maximum_height,
+                frames_per_second: job.profile.frames_per_second,
+                include_audio: job.profile.include_audio,
             }),
             MediaJobSpec::Cover(job) => MediaJob::Cover(CoverJob {
                 input_path: job.input_path.clone(),
@@ -1741,13 +1813,22 @@ fn load_output_config(app: &tauri::AppHandle) -> OutputConfig {
 }
 
 fn normalize_loaded_output_config(config: OutputConfig) -> OutputConfig {
+    let mut config = config;
+    if config.preview.is_none() {
+        config.preview = OutputConfig::default().preview;
+    }
     let mut config = config.normalized();
     if let Some(preview) = &mut config.preview {
-        preview.format = OutputFormat::Mp4;
-        preview.resolution = OutputResolution::FitWithin {
-            width: 854,
-            height: 480,
-        };
+        if !matches!(preview.format, OutputFormat::Mp4 | OutputFormat::Webm) {
+            preview.format = OutputFormat::Mp4;
+        }
+        if !matches!(preview.resolution, OutputResolution::FitWithin { width, height } if width >= 2 && height >= 2 && width <= 3840 && height <= 2160)
+        {
+            preview.resolution = OutputResolution::FitWithin {
+                width: 854,
+                height: 480,
+            };
+        }
         preview.fps = 15.min(config.main.fps);
     }
     if SUPPORTED_CAPTURE_FPS.contains(&config.main.fps) && config.main.resolution.is_valid() {
@@ -2226,7 +2307,7 @@ mod tests {
     }
 
     #[test]
-    fn migrates_unimplemented_preview_formats_to_the_first_mp4_profile() {
+    fn preserves_supported_preview_format_and_repairs_invalid_resolution() {
         let mut config = OutputConfig::default();
         let preview = config.preview.as_mut().unwrap();
         preview.format = OutputFormat::Webm;
@@ -2235,7 +2316,7 @@ mod tests {
 
         let normalized = normalize_loaded_output_config(config);
         let preview = normalized.preview.unwrap();
-        assert_eq!(preview.format, OutputFormat::Mp4);
+        assert_eq!(preview.format, OutputFormat::Webm);
         assert_eq!(preview.fps, 15);
         assert_eq!(
             preview.resolution,
@@ -2244,6 +2325,30 @@ mod tests {
                 height: 480,
             }
         );
+    }
+
+    #[test]
+    fn migrates_unsupported_preview_formats_to_mp4() {
+        let mut config = OutputConfig::default();
+        config.preview.as_mut().unwrap().format = OutputFormat::Mov;
+
+        assert_eq!(
+            normalize_loaded_output_config(config)
+                .preview
+                .unwrap()
+                .format,
+            OutputFormat::Mp4
+        );
+    }
+
+    #[test]
+    fn restores_a_missing_preview_profile() {
+        let config = OutputConfig {
+            preview: None,
+            ..OutputConfig::default()
+        };
+
+        assert!(normalize_loaded_output_config(config).preview.is_some());
     }
 
     #[test]

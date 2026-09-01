@@ -19,7 +19,7 @@ import { useEffect, useState } from "react";
 import { isTauriRuntime } from "./bridge";
 import { RecordingResult } from "./RecordingResult";
 import { useAppStore } from "./store";
-import type { DisplayChangeEvent, FinalizationEvent, InterruptedRecording, OutputResolution, OutputStatus, RecordingDetails, RecordingState } from "./domain";
+import type { DisplayChangeEvent, FinalizationEvent, InterruptedRecording, OutputFormat, OutputResolution, OutputStatus, RecordingDetails, RecordingState } from "./domain";
 import "./styles.css";
 
 function StatusDot({ available }: { available: boolean }) {
@@ -27,6 +27,7 @@ function StatusDot({ available }: { available: boolean }) {
 }
 
 type ResolutionChoice = "native" | "1080p" | "720p" | "custom";
+type PreviewResolutionChoice = "1080p" | "720p" | "480p" | "custom";
 
 function resolutionChoice(resolution: OutputResolution): ResolutionChoice {
   if (resolution.mode === "native") return "native";
@@ -43,6 +44,22 @@ function outputResolution(
   if (choice === "native") return { mode: "native" };
   if (choice === "1080p") return { mode: "fitWithin", width: 1920, height: 1080 };
   if (choice === "720p") return { mode: "fitWithin", width: 1280, height: 720 };
+  return { mode: "fitWithin", width: customWidth, height: customHeight };
+}
+
+function previewResolutionChoice(resolution: OutputResolution): PreviewResolutionChoice {
+  if (resolution.mode === "fitWithin") {
+    if (resolution.width === 1920 && resolution.height === 1080) return "1080p";
+    if (resolution.width === 1280 && resolution.height === 720) return "720p";
+    if (resolution.width === 854 && resolution.height === 480) return "480p";
+  }
+  return "custom";
+}
+
+function previewResolution(choice: PreviewResolutionChoice, customWidth: number, customHeight: number): OutputResolution {
+  if (choice === "1080p") return { mode: "fitWithin", width: 1920, height: 1080 };
+  if (choice === "720p") return { mode: "fitWithin", width: 1280, height: 720 };
+  if (choice === "480p") return { mode: "fitWithin", width: 854, height: 480 };
   return { mode: "fitWithin", width: customWidth, height: customHeight };
 }
 
@@ -76,6 +93,10 @@ export function App() {
   const [draftResolution, setDraftResolution] = useState<ResolutionChoice>("native");
   const [customWidth, setCustomWidth] = useState(1920);
   const [customHeight, setCustomHeight] = useState(1080);
+  const [draftPreviewFormat, setDraftPreviewFormat] = useState<OutputFormat>("mp4");
+  const [draftPreviewResolution, setDraftPreviewResolution] = useState<PreviewResolutionChoice>("480p");
+  const [customPreviewWidth, setCustomPreviewWidth] = useState(854);
+  const [customPreviewHeight, setCustomPreviewHeight] = useState(480);
   const [savingSettings, setSavingSettings] = useState(false);
   const [savingAudio, setSavingAudio] = useState<"microphone" | "systemAudio" | null>(null);
   const [savingCaptureDisplay, setSavingCaptureDisplay] = useState(false);
@@ -192,6 +213,13 @@ export function App() {
       setCustomWidth(snapshot.outputResolution.width);
       setCustomHeight(snapshot.outputResolution.height);
     }
+    setDraftPreviewFormat(snapshot.previewFormat);
+    const previewChoice = previewResolutionChoice(snapshot.previewResolution);
+    setDraftPreviewResolution(previewChoice);
+    if (snapshot.previewResolution.mode === "fitWithin" && previewChoice === "custom") {
+      setCustomPreviewWidth(snapshot.previewResolution.width);
+      setCustomPreviewHeight(snapshot.previewResolution.height);
+    }
     setSettingsOpen(true);
   };
 
@@ -212,6 +240,8 @@ export function App() {
       await updateOutputSettings(
         draftFps,
         outputResolution(draftResolution, customWidth, customHeight),
+        draftPreviewFormat,
+        previewResolution(draftPreviewResolution, customPreviewWidth, customPreviewHeight),
       );
       setSettingsOpen(false);
     } catch {
@@ -226,8 +256,14 @@ export function App() {
   const draftOutputResolution = outputResolution(draftResolution, customWidth, customHeight);
   const invalidCustomResolution = draftResolution === "custom"
     && (!Number.isInteger(customWidth) || !Number.isInteger(customHeight) || customWidth < 2 || customHeight < 2);
+  const draftPreviewOutputResolution = previewResolution(draftPreviewResolution, customPreviewWidth, customPreviewHeight);
+  const invalidCustomPreviewResolution = draftPreviewResolution === "custom"
+    && (!Number.isInteger(customPreviewWidth) || !Number.isInteger(customPreviewHeight)
+      || customPreviewWidth < 2 || customPreviewHeight < 2 || customPreviewWidth > 3840 || customPreviewHeight > 2160);
   const settingsUnchanged = draftFps === snapshot.captureFps
-    && sameResolution(draftOutputResolution, snapshot.outputResolution);
+    && sameResolution(draftOutputResolution, snapshot.outputResolution)
+    && draftPreviewFormat === snapshot.previewFormat
+    && sameResolution(draftPreviewOutputResolution, snapshot.previewResolution);
 
   const toggleAudio = async (source: "microphone" | "systemAudio", enabled: boolean) => {
     setSavingAudio(source);
@@ -694,10 +730,60 @@ export function App() {
               <p className="fps-warning" role="status">该帧率高于当前屏幕刷新率，视频仍会按 {draftFps} FPS 输出，但可能包含重复帧并增加文件大小。</p>
             )}
             </div>
+            <div className="setting-group preview-settings">
+              <h3>轻量预览格式</h3>
+              <div className="format-options" role="radiogroup" aria-label="轻量预览格式">
+                {([
+                  ["mp4", "MP4", "H.264 + AAC，兼容性最好"],
+                  ["webm", "WebM", "VP9 + Opus，通常文件更小"],
+                ] as const).map(([value, label, description]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    role="radio"
+                    aria-checked={draftPreviewFormat === value}
+                    className={draftPreviewFormat === value ? "format-option selected" : "format-option"}
+                    onClick={() => setDraftPreviewFormat(value)}
+                  >
+                    <strong>{label}</strong>
+                    <small>{description}</small>
+                  </button>
+                ))}
+              </div>
+              <h3 className="preview-resolution-heading">轻量预览分辨率</h3>
+              <div className="resolution-options" role="radiogroup" aria-label="轻量预览分辨率">
+                {([
+                  ["480p", "480p", "最高 854×480"],
+                  ["720p", "720p", "最高 1280×720"],
+                  ["1080p", "1080p", "最高 1920×1080"],
+                  ["custom", "自定义", "保持母版比例"],
+                ] as const).map(([value, label, description]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    role="radio"
+                    aria-checked={draftPreviewResolution === value}
+                    className={draftPreviewResolution === value ? "resolution-option selected" : "resolution-option"}
+                    onClick={() => setDraftPreviewResolution(value)}
+                  >
+                    <strong>{label}</strong>
+                    <small>{description}</small>
+                  </button>
+                ))}
+              </div>
+              {draftPreviewResolution === "custom" && (
+                <div className="custom-resolution">
+                  <label>最大宽度<input type="number" min="2" max="3840" step="2" value={customPreviewWidth} onChange={(event) => setCustomPreviewWidth(Number.isFinite(event.currentTarget.valueAsNumber) ? event.currentTarget.valueAsNumber : 0)} /></label>
+                  <span>×</span>
+                  <label>最大高度<input type="number" min="2" max="2160" step="2" value={customPreviewHeight} onChange={(event) => setCustomPreviewHeight(Number.isFinite(event.currentTarget.valueAsNumber) ? event.currentTarget.valueAsNumber : 0)} /></label>
+                </div>
+              )}
+              <p className="preview-settings-note">设置仅应用于之后完成的录制；每个录制组会保存自己的预览配置，重试时不会被后来修改的设置覆盖。</p>
+            </div>
             <p className="third-party-notice">FrameFlow 使用 FFmpeg 项目的独立运行时处理预览与封面，该运行时依据 LGPLv3 或更高版本分发；许可证、对应源码和构建配方随安装包提供。</p>
             <footer>
               <button disabled={savingSettings} onClick={() => setSettingsOpen(false)}>取消</button>
-              <button className="settings-save" disabled={savingSettings || invalidCustomResolution || settingsUnchanged} onClick={() => void saveSettings()}>
+              <button className="settings-save" disabled={savingSettings || invalidCustomResolution || invalidCustomPreviewResolution || settingsUnchanged} onClick={() => void saveSettings()}>
                 {savingSettings ? "保存中…" : "保存设置"}
               </button>
             </footer>

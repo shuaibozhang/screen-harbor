@@ -136,6 +136,14 @@ button.row:hover { border-color: #ccd4e4; background: #fbfcfe; }
 .setting-group + .setting-group { margin-top: 18px; }
 .setting-group h3 { margin: 0 0 10px; color: #596579; font-size: 12px; }
 .resolution-options { display: grid; grid-template-columns: repeat(2, 1fr); gap: 9px; }
+.format-options { display: grid; grid-template-columns: repeat(2, 1fr); gap: 9px; }
+.format-option { display: flex; min-height: 62px; flex-direction: column; gap: 5px; align-items: flex-start; justify-content: center; padding: 10px 13px; border: 1px solid #dce2eb; color: #344056; background: #f8f9fb; border-radius: 11px; cursor: pointer; text-align: left; }
+.format-option:hover { border-color: #aebce1; background: #f4f6fd; }
+.format-option.selected { border-color: #4269e1; color: #3157c8; background: #eef2ff; box-shadow: inset 0 0 0 1px #4269e1; }
+.format-option strong { font-size: 13px; }
+.format-option small { color: #7b8494; font-size: 10px; }
+.preview-resolution-heading { margin-top: 14px !important; }
+.preview-settings-note { margin: 10px 0 0; color: #7b8494; font-size: 10px; line-height: 1.55; }
 .resolution-option { display: flex; min-height: 62px; flex-direction: column; gap: 5px; align-items: flex-start; justify-content: center; padding: 10px 13px; border: 1px solid #dce2eb; color: #344056; background: #f8f9fb; border-radius: 11px; cursor: pointer; text-align: left; }
 .resolution-option:hover { border-color: #aebce1; background: #f4f6fd; }
 .resolution-option.selected { border-color: #4269e1; color: #3157c8; background: #eef2ff; box-shadow: inset 0 0 0 1px #4269e1; }
@@ -176,11 +184,14 @@ button.row:hover { border-color: #ccd4e4; background: #fbfcfe; }
   .empty strong { color: #b7c0ce; }
   .settings-backdrop { background: rgba(5, 8, 12, .58); }
   .settings-dialog { border-color: #3a424d; background: #282e37; }
-  .settings-help, .fps-option small, .resolution-option small, .custom-resolution label { color: #9ca6b5; }
+  .settings-help, .fps-option small, .resolution-option small, .format-option small, .custom-resolution label, .preview-settings-note { color: #9ca6b5; }
   .setting-group h3 { color: #b7c0ce; }
   .resolution-option { border-color: #404957; color: #dce3ed; background: #303741; }
   .resolution-option:hover { border-color: #5b6980; background: #343c48; }
   .resolution-option.selected { border-color: #6f8ff1; color: #dce5ff; background: #304374; }
+  .format-option { border-color: #404957; color: #dce3ed; background: #303741; }
+  .format-option:hover { border-color: #5b6980; background: #343c48; }
+  .format-option.selected { border-color: #6f8ff1; color: #dce5ff; background: #304374; }
   .custom-resolution input { border-color: #46505e; background: #303741; }
   .monitor-rate { color: #cbd8ff; background: #28385c; }
   .fps-option { border-color: #404957; color: #dce3ed; background: #303741; }

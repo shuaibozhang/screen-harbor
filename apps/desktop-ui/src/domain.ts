@@ -11,6 +11,7 @@ export type RecordingState =
   | "failed";
 
 export type OutputStatus = "not_requested" | "pending" | "processing" | "completed" | "failed";
+export type OutputFormat = "mp4" | "webm";
 
 export interface RecentRecording {
   id: string;
@@ -60,6 +61,8 @@ export interface AppSnapshot {
   outputSummary: string;
   captureFps: number;
   outputResolution: OutputResolution;
+  previewFormat: OutputFormat;
+  previewResolution: OutputResolution;
   supportedCaptureFps: number[];
   monitorRefreshRateHz?: number;
   recommendedCaptureFps: number;

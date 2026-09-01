@@ -9,7 +9,23 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-const MEDIA_WORKER_PROTOCOL_VERSION: u16 = 1;
+const MEDIA_WORKER_PROTOCOL_VERSION: u16 = 2;
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewFormat {
+    Mp4,
+    Webm,
+}
+
+impl PreviewFormat {
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Mp4 => "mp4",
+            Self::Webm => "webm",
+        }
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -17,6 +33,7 @@ pub struct PreviewJob {
     pub input_path: PathBuf,
     pub temporary_path: PathBuf,
     pub output_path: PathBuf,
+    pub format: PreviewFormat,
     pub maximum_width: u32,
     pub maximum_height: u32,
     pub frames_per_second: u16,
@@ -270,12 +287,14 @@ fn validate_preview_job(job: &PreviewJob) -> Result<(), String> {
             return Err("preview files must stay inside the recording group".to_owned());
         }
     }
+    let output_name = format!("preview.{}", job.format.extension());
+    let temporary_name = format!("{output_name}.part");
     if job
         .temporary_path
         .file_name()
         .and_then(|name| name.to_str())
-        != Some("preview.mp4.part")
-        || job.output_path.file_name().and_then(|name| name.to_str()) != Some("preview.mp4")
+        != Some(temporary_name.as_str())
+        || job.output_path.file_name().and_then(|name| name.to_str()) != Some(output_name.as_str())
     {
         return Err("preview output names do not match the recording group contract".to_owned());
     }
@@ -344,25 +363,51 @@ fn ffmpeg_arguments(job: &PreviewJob) -> Vec<OsString> {
         job.frames_per_second.to_string().into(),
         "-fps_mode".into(),
         "cfr".into(),
-        "-c:v".into(),
-        "h264_mf".into(),
-        "-rate_control".into(),
-        "quality".into(),
-        "-quality".into(),
-        "70".into(),
-        "-pix_fmt".into(),
-        "yuv420p".into(),
     ]);
-    if job.include_audio {
-        arguments.extend(["-c:a".into(), "aac_mf".into(), "-b:a".into(), "96k".into()]);
+    match job.format {
+        PreviewFormat::Mp4 => {
+            arguments.extend([
+                "-c:v".into(),
+                "h264_mf".into(),
+                "-rate_control".into(),
+                "quality".into(),
+                "-quality".into(),
+                "70".into(),
+                "-pix_fmt".into(),
+                "yuv420p".into(),
+            ]);
+            if job.include_audio {
+                arguments.extend(["-c:a".into(), "aac_mf".into(), "-b:a".into(), "96k".into()]);
+            }
+            arguments.extend([
+                "-movflags".into(),
+                "+faststart".into(),
+                "-f".into(),
+                "mp4".into(),
+            ]);
+        }
+        PreviewFormat::Webm => {
+            arguments.extend([
+                "-c:v".into(),
+                "libvpx-vp9".into(),
+                "-crf".into(),
+                "34".into(),
+                "-b:v".into(),
+                "0".into(),
+                "-deadline".into(),
+                "realtime".into(),
+                "-cpu-used".into(),
+                "6".into(),
+                "-pix_fmt".into(),
+                "yuv420p".into(),
+            ]);
+            if job.include_audio {
+                arguments.extend(["-c:a".into(), "libopus".into(), "-b:a".into(), "96k".into()]);
+            }
+            arguments.extend(["-f".into(), "webm".into()]);
+        }
     }
-    arguments.extend([
-        "-movflags".into(),
-        "+faststart".into(),
-        "-f".into(),
-        "mp4".into(),
-        job.temporary_path.as_os_str().to_owned(),
-    ]);
+    arguments.push(job.temporary_path.as_os_str().to_owned());
     arguments
 }
 
@@ -480,6 +525,7 @@ mod tests {
             input_path: "main.mp4".into(),
             temporary_path: "preview.mp4.part".into(),
             output_path: "preview.mp4".into(),
+            format: PreviewFormat::Mp4,
             maximum_width: 854,
             maximum_height: 480,
             frames_per_second: 15,
@@ -509,6 +555,7 @@ mod tests {
                 input_path: r"D:\录制 文件\main.mp4".into(),
                 temporary_path: r"D:\录制 文件\preview.mp4.part".into(),
                 output_path: r"D:\录制 文件\preview.mp4".into(),
+                format: PreviewFormat::Mp4,
                 maximum_width: 854,
                 maximum_height: 480,
                 frames_per_second: 15,
@@ -522,6 +569,29 @@ mod tests {
                 .job,
             request.job
         );
+    }
+
+    #[test]
+    fn webm_preview_arguments_use_vp9_and_opus() {
+        let job = PreviewJob {
+            input_path: "main.mp4".into(),
+            temporary_path: "preview.webm.part".into(),
+            output_path: "preview.webm".into(),
+            format: PreviewFormat::Webm,
+            maximum_width: 1280,
+            maximum_height: 720,
+            frames_per_second: 15,
+            include_audio: true,
+        };
+        let arguments = ffmpeg_arguments(&job)
+            .into_iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(arguments
+            .windows(2)
+            .any(|pair| pair == ["-c:v", "libvpx-vp9"]));
+        assert!(arguments.windows(2).any(|pair| pair == ["-c:a", "libopus"]));
+        assert!(arguments.windows(2).any(|pair| pair == ["-f", "webm"]));
     }
 
     #[test]

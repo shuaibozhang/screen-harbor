@@ -11,9 +11,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use frameflow_core::Resolution;
+use frameflow_media::PreviewFormat;
 
 const SCHEMA_VERSION: u32 = 2;
-const MANIFEST_SCHEMA_VERSION: u32 = 1;
+const MANIFEST_SCHEMA_VERSION: u32 = 2;
 const MANIFEST_FILE_NAME: &str = "recording.json";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -101,7 +102,31 @@ struct RecordingManifest {
     display_name: String,
     created_at_ms: u64,
     duration_ms: u64,
+    #[serde(default)]
+    preview_profile: PreviewProfile,
     outputs: ManifestOutputs,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PreviewProfile {
+    pub(crate) format: PreviewFormat,
+    pub(crate) maximum_width: u32,
+    pub(crate) maximum_height: u32,
+    pub(crate) frames_per_second: u16,
+    pub(crate) include_audio: bool,
+}
+
+impl Default for PreviewProfile {
+    fn default() -> Self {
+        Self {
+            format: PreviewFormat::Mp4,
+            maximum_width: 854,
+            maximum_height: 480,
+            frames_per_second: 15,
+            include_audio: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -136,6 +161,7 @@ pub(crate) struct PreviewJobSpec {
     pub(crate) input_path: PathBuf,
     pub(crate) temporary_path: PathBuf,
     pub(crate) output_path: PathBuf,
+    pub(crate) profile: PreviewProfile,
 }
 
 #[derive(Clone, Debug)]
@@ -178,13 +204,22 @@ impl RecordingManifest {
         duration_ms: u64,
         resolution: Resolution,
         frames_per_second: u16,
+        preview_profile: PreviewProfile,
     ) -> Self {
+        let preview_name = format!(
+            "preview.{}",
+            match preview_profile.format {
+                PreviewFormat::Mp4 => "mp4",
+                PreviewFormat::Webm => "webm",
+            }
+        );
         Self {
             schema_version: MANIFEST_SCHEMA_VERSION,
             id: recording.id.clone(),
             display_name: recording.name.clone(),
             created_at_ms: recording.created_at_ms,
             duration_ms,
+            preview_profile,
             outputs: ManifestOutputs {
                 main: OutputArtifact {
                     status: OutputStatus::Completed,
@@ -200,7 +235,7 @@ impl RecordingManifest {
                 },
                 preview: OutputArtifact {
                     status: OutputStatus::Pending,
-                    path: Some("preview.mp4".to_owned()),
+                    path: Some(preview_name),
                     file_size_bytes: None,
                     error: None,
                     width: None,
@@ -436,6 +471,7 @@ impl RecordingIndex {
         duration: Duration,
         resolution: Resolution,
         frames_per_second: u16,
+        preview_profile: PreviewProfile,
     ) -> Result<String, String> {
         let mut recording = inspect_recording(output_path)?
             .ok_or_else(|| "finalized recording is not a readable MP4".to_owned())?;
@@ -447,6 +483,7 @@ impl RecordingIndex {
                 duration_ms,
                 resolution,
                 frames_per_second,
+                preview_profile,
             );
             let manifest_path = recording.group_directory.join(MANIFEST_FILE_NAME);
             write_manifest_atomically(&manifest_path, &manifest)?;
@@ -540,8 +577,15 @@ impl RecordingIndex {
         Ok(PreviewJobSpec {
             id: manifest.id,
             input_path,
-            temporary_path: output_path.with_extension("mp4.part"),
+            temporary_path: output_path.with_extension(format!(
+                "{}.part",
+                output_path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("mp4")
+            )),
             output_path,
+            profile: manifest.preview_profile,
         })
     }
 
@@ -592,14 +636,14 @@ impl RecordingIndex {
                     let preview = preview_resolution(
                         Resolution { width, height },
                         Resolution {
-                            width: 854,
-                            height: 480,
+                            width: job.profile.maximum_width,
+                            height: job.profile.maximum_height,
                         },
                     );
                     manifest.outputs.preview.width = Some(preview.width);
                     manifest.outputs.preview.height = Some(preview.height);
                 }
-                manifest.outputs.preview.frames_per_second = Some(15);
+                manifest.outputs.preview.frames_per_second = Some(job.profile.frames_per_second);
                 (OutputStatus::Completed, None)
             }
             Err(error) => {
@@ -1313,7 +1357,9 @@ fn is_group_main(path: &Path) -> bool {
 fn is_preview_artifact(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| name.eq_ignore_ascii_case("preview.mp4"))
+        .is_some_and(|name| {
+            name.eq_ignore_ascii_case("preview.mp4") || name.eq_ignore_ascii_case("preview.webm")
+        })
 }
 
 fn group_id_from_main_path(path: &Path) -> Option<String> {
@@ -1417,6 +1463,7 @@ mod tests {
                         height: 1080,
                     },
                     60,
+                    PreviewProfile::default(),
                 )
                 .unwrap();
         }
@@ -1654,6 +1701,44 @@ mod tests {
             details.preview.path,
             Some(job.output_path.to_string_lossy().into_owned())
         );
+    }
+
+    #[test]
+    fn webm_preview_profile_is_frozen_in_the_recording_group() {
+        let workspace = TestWorkspace::new("webm-preview-profile");
+        let path = workspace.group_recording("1700000000020");
+        let index = workspace.index();
+        let profile = PreviewProfile {
+            format: PreviewFormat::Webm,
+            maximum_width: 1280,
+            maximum_height: 720,
+            frames_per_second: 15,
+            include_audio: true,
+        };
+        index
+            .record_completed(
+                &path,
+                Duration::from_secs(3),
+                Resolution {
+                    width: 1920,
+                    height: 1080,
+                },
+                60,
+                profile,
+            )
+            .unwrap();
+
+        let job = index.prepare_preview_for_path(&path).unwrap();
+        assert_eq!(job.output_path.file_name().unwrap(), "preview.webm");
+        assert_eq!(job.temporary_path.file_name().unwrap(), "preview.webm.part");
+        assert_eq!(job.profile.format, PreviewFormat::Webm);
+        assert_eq!(job.profile.maximum_width, 1280);
+        fs::write(&job.output_path, b"preview").unwrap();
+        index.finish_preview(&job, Ok(())).unwrap();
+
+        let manifest = read_manifest(&path.parent().unwrap().join(MANIFEST_FILE_NAME)).unwrap();
+        assert_eq!(manifest.outputs.preview.width, Some(1280));
+        assert_eq!(manifest.outputs.preview.height, Some(720));
     }
 
     #[test]

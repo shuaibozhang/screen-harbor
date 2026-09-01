@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AppSnapshot, OutputResolution } from "./domain";
+import type { AppSnapshot, OutputFormat, OutputResolution } from "./domain";
 
 const developmentSnapshot: AppSnapshot = {
   recordingState: "idle",
@@ -8,9 +8,11 @@ const developmentSnapshot: AppSnapshot = {
   globalShortcutAvailable: true,
   microphone: { enabled: true, deviceName: "默认麦克风", available: true },
   systemAudio: { enabled: false, deviceName: "扬声器（默认设备）", available: true },
-  outputSummary: "MP4 · 有声音 / WebM · 480p · 有声音 / 封面",
+  outputSummary: "母版 MP4 · H.264/AAC · 原始分辨率 · 30 FPS · 系统声 / 预览 WebM · 最高 854×480 · 15 FPS",
   captureFps: 30,
   outputResolution: { mode: "native" },
+  previewFormat: "webm",
+  previewResolution: { mode: "fitWithin", width: 854, height: 480 },
   supportedCaptureFps: [24, 30, 60],
   monitorRefreshRateHz: 60,
   recommendedCaptureFps: 60,
@@ -44,8 +46,10 @@ export async function setCaptureDisplay(displayId: string): Promise<void> {
 export async function setOutputSettings(
   fps: number,
   resolution: OutputResolution,
+  previewFormat: OutputFormat,
+  previewResolution: OutputResolution,
 ): Promise<void> {
-  if (isTauriRuntime()) await invoke("set_output_settings", { fps, resolution });
+  if (isTauriRuntime()) await invoke("set_output_settings", { fps, resolution, previewFormat, previewResolution });
 }
 
 export async function setAudioInput(
