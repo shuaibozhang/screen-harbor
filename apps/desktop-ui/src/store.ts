@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { beginSelection, chooseSaveDirectory, getAppSnapshot, setAudioInput, setCaptureDisplay, setOutputSettings } from "./bridge";
+import { beginSelection, chooseSaveDirectory, getAppSnapshot, setAudioInput, setOutputSettings } from "./bridge";
 import type { AppSnapshot, OutputFormat, OutputResolution } from "./domain";
 
 interface AppStore {
@@ -10,7 +10,6 @@ interface AppStore {
   startSelection: () => Promise<void>;
   updateOutputSettings: (fps: number, resolution: OutputResolution, previewFormat: OutputFormat, previewResolution: OutputResolution) => Promise<void>;
   updateAudioInput: (source: "microphone" | "systemAudio", enabled: boolean) => Promise<void>;
-  updateCaptureDisplay: (displayId: string) => Promise<void>;
   updateSaveDirectory: () => Promise<boolean>;
 }
 
@@ -48,15 +47,6 @@ export const useAppStore = create<AppStore>((set) => ({
       set({ snapshot: await getAppSnapshot(), error: null });
     } catch (cause) {
       set({ error: `无法更新音频输入：${String(cause)}` });
-      throw cause;
-    }
-  },
-  updateCaptureDisplay: async (displayId) => {
-    try {
-      await setCaptureDisplay(displayId);
-      set({ snapshot: await getAppSnapshot(), error: null });
-    } catch (cause) {
-      set({ error: `无法切换录制屏幕：${String(cause)}` });
       throw cause;
     }
   },

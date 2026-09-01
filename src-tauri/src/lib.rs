@@ -17,7 +17,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use capture_display::{choose_display, display_options, ordered_displays, CaptureDisplayOption};
+use capture_display::{choose_reference_display, ordered_displays};
 use frameflow_capture::{DisplayInfo, PhysicalRect, RegionSelection};
 use frameflow_core::{
     OutputConfig, OutputFormat, OutputResolution, RecordingAction, RecordingState,
@@ -45,9 +45,7 @@ use tauri::{
     Emitter, Manager, PhysicalPosition, PhysicalSize, State, WindowEvent,
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
-use window_layout::{
-    capture_toolbar_layout, selection_hint_layout, CaptureToolbar, MonitorGeometry,
-};
+use window_layout::{capture_toolbar_layout, CaptureToolbar, MonitorGeometry};
 
 const TRAY_SHOW_ID: &str = "show";
 const TRAY_QUIT_ID: &str = "quit";
@@ -63,10 +61,9 @@ struct AppState {
     recording_index: OnceLock<Result<RecordingIndex, String>>,
     media_jobs: Mutex<HashSet<String>>,
     media_queue: OnceLock<mpsc::SyncSender<MediaJobSpec>>,
-    native_selection: Mutex<Option<frameflow_windows::NativeSelectionSession>>,
+    native_selection: Mutex<Option<frameflow_windows::NativeDisplaySelectionSession>>,
     output_config: Mutex<OutputConfig>,
     audio_config: Mutex<AudioInputConfig>,
-    capture_display_id: Mutex<Option<String>>,
     display_watcher: Mutex<Option<frameflow_windows::DisplayChangeSession>>,
     storage_config: Mutex<StorageConfig>,
     global_shortcut_available: AtomicBool,
@@ -161,17 +158,8 @@ struct AppSnapshot {
     supported_capture_fps: [u16; 3],
     monitor_refresh_rate_hz: Option<u32>,
     recommended_capture_fps: u16,
-    capture_displays: Vec<CaptureDisplayOption>,
-    selected_capture_display_id: String,
     recent_recordings: Vec<RecordingSummary>,
     interrupted_recordings: Vec<InterruptedRecording>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CaptureSourceConfig {
-    #[serde(default)]
-    display_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -257,25 +245,13 @@ fn main_window_display_bounds(app: &tauri::AppHandle) -> Option<PhysicalRect> {
     })
 }
 
-fn capture_displays(
-    app: &tauri::AppHandle,
-    state: &AppState,
-) -> Result<(Vec<DisplayInfo>, DisplayInfo), String> {
+fn capture_displays() -> Result<Vec<DisplayInfo>, String> {
     let displays =
         ordered_displays(frameflow_windows::list_displays().map_err(|error| error.to_string())?);
-    let preferred_id = state
-        .capture_display_id
-        .lock()
-        .map_err(|_| "capture display setting is unavailable".to_owned())?
-        .clone();
-    let selected = choose_display(
-        &displays,
-        preferred_id.as_deref(),
-        main_window_display_bounds(app),
-    )
-    .cloned()
-    .ok_or_else(|| "no capture display is available".to_owned())?;
-    Ok((displays, selected))
+    if displays.is_empty() {
+        return Err("no capture display is available".to_owned());
+    }
+    Ok(displays)
 }
 
 #[tauri::command]
@@ -308,8 +284,10 @@ fn get_app_snapshot(
             .preview
             .expect("default preview profile")
     });
-    let (displays, selected_display) = capture_displays(&app, &state)?;
-    let monitor_refresh_rate_hz = selected_display.refresh_rate_hz;
+    let displays = capture_displays()?;
+    let reference_display = choose_reference_display(&displays, main_window_display_bounds(&app))
+        .ok_or_else(|| "no capture display is available".to_owned())?;
+    let monitor_refresh_rate_hz = reference_display.refresh_rate_hz;
     let recommended_capture_fps = recommended_capture_fps(monitor_refresh_rate_hz);
     let audio_endpoints = frameflow_windows::default_audio_endpoints().unwrap_or_default();
     let audio_config = *state
@@ -357,8 +335,6 @@ fn get_app_snapshot(
         supported_capture_fps: SUPPORTED_CAPTURE_FPS,
         monitor_refresh_rate_hz,
         recommended_capture_fps,
-        capture_displays: display_options(&displays),
-        selected_capture_display_id: selected_display.id,
         recent_recordings,
         interrupted_recordings,
     })
@@ -421,36 +397,6 @@ fn ensure_storage_change_allowed(state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-fn set_capture_display(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    display_id: String,
-) -> Result<(), String> {
-    if state
-        .recording
-        .lock()
-        .map_err(|_| "recording state is unavailable".to_owned())?
-        .state()
-        != RecordingState::Idle
-    {
-        return Err("capture display can only be changed while idle".to_owned());
-    }
-    let displays = frameflow_windows::list_displays().map_err(|error| error.to_string())?;
-    if !displays.iter().any(|display| display.id == display_id) {
-        return Err("the selected capture display is unavailable".to_owned());
-    }
-    let config = CaptureSourceConfig {
-        display_id: Some(display_id.clone()),
-    };
-    save_capture_source_config(&app, &config)?;
-    *state
-        .capture_display_id
-        .lock()
-        .map_err(|_| "capture display setting is unavailable".to_owned())? = Some(display_id);
-    Ok(())
-}
-
 fn handle_display_change(app: &tauri::AppHandle) {
     let available_ids = match frameflow_windows::list_displays() {
         Ok(displays) => displays
@@ -479,12 +425,13 @@ fn handle_display_change(app: &tauri::AppHandle) {
         .lock()
         .map(|recording| recording.state())
         .unwrap_or(RecordingState::Idle);
-    let selection_cancelled = matches!(
-        recording_state,
-        RecordingState::Selecting | RecordingState::Ready | RecordingState::Countdown
-    ) && selected_display_id
-        .as_ref()
-        .is_some_and(|display_id| !available_ids.contains(display_id));
+    let selection_cancelled = recording_state == RecordingState::Selecting
+        || matches!(
+            recording_state,
+            RecordingState::Ready | RecordingState::Countdown
+        ) && selected_display_id
+            .as_ref()
+            .is_some_and(|display_id| !available_ids.contains(display_id));
 
     if selection_cancelled {
         if let Ok(mut native) = state.native_selection.lock() {
@@ -814,7 +761,16 @@ fn begin_selection_impl(
     let controls = app
         .get_webview_window("recording-controls")
         .ok_or_else(|| "recording controls window is unavailable".to_owned())?;
-    let (_, display) = capture_displays(app, state)?;
+    let displays = capture_displays()?;
+
+    if let Some(native) = state
+        .native_selection
+        .lock()
+        .map_err(|_| "native selection state is unavailable".to_owned())?
+        .take()
+    {
+        native.stop();
+    }
 
     overlay.hide().map_err(|error| error.to_string())?;
     controls.hide().map_err(|error| error.to_string())?;
@@ -830,28 +786,31 @@ fn begin_selection_impl(
     *state
         .selection
         .lock()
-        .map_err(|_| "selection state is unavailable".to_owned())? = Some(ActiveSelection {
-        display: display.clone(),
-        region: None,
-    });
+        .map_err(|_| "selection state is unavailable".to_owned())? = None;
 
     let callback_app = app.clone();
-    let native =
-        match frameflow_windows::start_native_selection(display.bounds, move |relative_rect| {
-            native_selection_finished(&callback_app, relative_rect)
-        }) {
-            Ok(native) => native,
-            Err(error) => {
-                if let Ok(mut recording) = state.recording.lock() {
-                    let _ = recording.apply(RecordingAction::CancelSelection);
-                }
-                if let Ok(mut selection) = state.selection.lock() {
-                    *selection = None;
-                }
-                let _ = restore_main_window(app);
-                return Err(error.to_string());
+    let native = match frameflow_windows::start_native_display_selection(
+        &displays,
+        move |display, relative_rect| {
+            let event_app = callback_app.clone();
+            let dispatch_app = event_app.clone();
+            let _ = dispatch_app.run_on_main_thread(move || {
+                native_selection_finished(&event_app, display, relative_rect);
+            });
+        },
+    ) {
+        Ok(native) => native,
+        Err(error) => {
+            if let Ok(mut recording) = state.recording.lock() {
+                let _ = recording.apply(RecordingAction::CancelSelection);
             }
-        };
+            if let Ok(mut selection) = state.selection.lock() {
+                *selection = None;
+            }
+            let _ = restore_main_window(app);
+            return Err(error.to_string());
+        }
+    };
     *state
         .native_selection
         .lock()
@@ -860,9 +819,6 @@ fn begin_selection_impl(
     app.emit("recording://state-changed", next_state)
         .map_err(|error| error.to_string())?;
     let _ = app.emit("selection://started", ());
-    let _ = position_selection_hint(&overlay, display.bounds);
-    let _ = overlay.show();
-    let _ = overlay.set_focus();
 
     Ok(next_state)
 }
@@ -896,7 +852,7 @@ fn redraw_selection(app: tauri::AppHandle, state: State<'_, AppState>) -> Result
     {
         native.stop();
     }
-    let bounds = {
+    let display = {
         let mut selection = state
             .selection
             .lock()
@@ -905,31 +861,51 @@ fn redraw_selection(app: tauri::AppHandle, state: State<'_, AppState>) -> Result
             .as_mut()
             .ok_or_else(|| "selection has not started".to_owned())?;
         active.region = None;
-        active.display.bounds
+        active.display.clone()
     };
     if let Some(toolbar) = app.get_webview_window("selection") {
         toolbar.hide().map_err(|error| error.to_string())?;
     }
     let callback_app = app.clone();
-    let native = frameflow_windows::start_native_selection(bounds, move |relative_rect| {
-        native_selection_finished(&callback_app, relative_rect)
-    })
+    let native = frameflow_windows::start_native_display_selection(
+        std::slice::from_ref(&display),
+        move |display, relative_rect| {
+            let event_app = callback_app.clone();
+            let dispatch_app = event_app.clone();
+            let _ = dispatch_app.run_on_main_thread(move || {
+                native_selection_finished(&event_app, display, relative_rect);
+            });
+        },
+    )
     .map_err(|error| error.to_string())?;
     *state
         .native_selection
         .lock()
         .map_err(|_| "native selection state is unavailable".to_owned())? = Some(native);
-    if let Some(toolbar) = app.get_webview_window("selection") {
-        let _ = app.emit("selection://started", ());
-        let _ = position_selection_hint(&toolbar, bounds);
-        let _ = toolbar.show();
-        let _ = toolbar.set_focus();
-    }
+    let _ = app.emit("selection://started", ());
     Ok(())
 }
 
-fn native_selection_finished(app: &tauri::AppHandle, relative_rect: Option<PhysicalRect>) {
+fn native_selection_finished(
+    app: &tauri::AppHandle,
+    display: DisplayInfo,
+    relative_rect: Option<PhysicalRect>,
+) {
     let state = app.state::<AppState>();
+    let event_is_current = state
+        .native_selection
+        .lock()
+        .ok()
+        .and_then(|mut native| {
+            native
+                .as_mut()
+                .map(|session| session.select_display(&display.id))
+        })
+        .unwrap_or(false);
+    if !event_is_current {
+        return;
+    }
+
     let Some(relative_rect) = relative_rect else {
         if let Ok(mut recording) = state.recording.lock() {
             let _ = recording.apply(RecordingAction::CancelSelection);
@@ -946,10 +922,13 @@ fn native_selection_finished(app: &tauri::AppHandle, relative_rect: Option<Physi
             Ok(selection) => selection,
             Err(_) => return,
         };
-        let active = match selection.as_mut() {
-            Some(active) => active,
-            None => return,
-        };
+        let active = selection.get_or_insert_with(|| ActiveSelection {
+            display: display.clone(),
+            region: None,
+        });
+        if active.display.id != display.id {
+            return;
+        }
         let mut capture_rect = relative_rect;
         capture_rect.width &= !1;
         capture_rect.height &= !1;
@@ -1768,38 +1747,6 @@ fn position_capture_toolbar(
     Ok(())
 }
 
-fn position_selection_hint(
-    controls: &tauri::WebviewWindow,
-    display_bounds: PhysicalRect,
-) -> Result<(), String> {
-    let monitor = controls
-        .monitor_from_point(f64::from(display_bounds.x), f64::from(display_bounds.y))
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "selection display is unavailable".to_owned())?;
-    let monitor_position = *monitor.position();
-    let monitor_size = *monitor.size();
-    let layout = selection_hint_layout(
-        MonitorGeometry {
-            x: monitor_position.x,
-            y: monitor_position.y,
-            width: monitor_size.width,
-            height: monitor_size.height,
-        },
-        monitor.scale_factor(),
-    );
-
-    let current_size = controls.outer_size().map_err(|error| error.to_string())?;
-    if current_size.width != layout.width || current_size.height != layout.height {
-        controls
-            .set_size(PhysicalSize::new(layout.width, layout.height))
-            .map_err(|error| error.to_string())?;
-    }
-    controls
-        .set_position(PhysicalPosition::new(layout.x, layout.y))
-        .map_err(|error| error.to_string())?;
-    Ok(())
-}
-
 fn default_save_directory() -> PathBuf {
     std::env::var_os("USERPROFILE")
         .map(PathBuf::from)
@@ -1907,35 +1854,6 @@ fn audio_config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .app_config_dir()
         .map(|directory| directory.join("audio.json"))
         .map_err(|error| error.to_string())
-}
-
-fn capture_source_config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map(|directory| directory.join("capture-source.json"))
-        .map_err(|error| error.to_string())
-}
-
-fn load_capture_source_config(app: &tauri::AppHandle) -> CaptureSourceConfig {
-    capture_source_config_path(app)
-        .and_then(|path| fs::read(path).map_err(|error| error.to_string()))
-        .and_then(|bytes| {
-            serde_json::from_slice::<CaptureSourceConfig>(&bytes).map_err(|error| error.to_string())
-        })
-        .unwrap_or_default()
-}
-
-fn save_capture_source_config(
-    app: &tauri::AppHandle,
-    config: &CaptureSourceConfig,
-) -> Result<(), String> {
-    let path = capture_source_config_path(app)?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| "capture source settings directory is unavailable".to_owned())?;
-    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    let json = serde_json::to_vec_pretty(config).map_err(|error| error.to_string())?;
-    fs::write(path, json).map_err(|error| error.to_string())
 }
 
 fn storage_config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -2181,7 +2099,6 @@ pub fn run() {
             native_selection: Mutex::new(None),
             output_config: Mutex::new(OutputConfig::default().normalized()),
             audio_config: Mutex::new(AudioInputConfig::default()),
-            capture_display_id: Mutex::new(None),
             display_watcher: Mutex::new(None),
             storage_config: Mutex::new(StorageConfig::default()),
             global_shortcut_available: AtomicBool::new(false),
@@ -2217,12 +2134,6 @@ pub fn run() {
                 .audio_config
                 .lock()
                 .expect("audio settings are unavailable") = audio_config;
-            let capture_source_config = load_capture_source_config(app.handle());
-            *app.state::<AppState>()
-                .capture_display_id
-                .lock()
-                .expect("capture display setting is unavailable") =
-                capture_source_config.display_id;
             let storage_config = load_storage_config(app.handle());
             for directory in &storage_config.library_directories {
                 if directory.is_dir() {
@@ -2301,7 +2212,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_app_snapshot,
             choose_save_directory,
-            set_capture_display,
             open_recording_location,
             get_recording_details,
             delete_recordings,

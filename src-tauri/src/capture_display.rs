@@ -1,18 +1,4 @@
 use frameflow_capture::{DisplayInfo, PhysicalRect};
-use serde::Serialize;
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct CaptureDisplayOption {
-    pub(crate) id: String,
-    pub(crate) label: String,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-    pub(crate) scale_percent: u32,
-    pub(crate) primary: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) refresh_rate_hz: Option<u32>,
-}
 
 pub(crate) fn ordered_displays(mut displays: Vec<DisplayInfo>) -> Vec<DisplayInfo> {
     displays.sort_by_key(|display| {
@@ -26,39 +12,16 @@ pub(crate) fn ordered_displays(mut displays: Vec<DisplayInfo>) -> Vec<DisplayInf
     displays
 }
 
-pub(crate) fn choose_display<'a>(
-    displays: &'a [DisplayInfo],
-    preferred_id: Option<&str>,
+/// Chooses a display only for main-window context such as FPS guidance. Actual
+/// capture display selection happens interactively when the user draws.
+pub(crate) fn choose_reference_display(
+    displays: &[DisplayInfo],
     main_window_bounds: Option<PhysicalRect>,
-) -> Option<&'a DisplayInfo> {
-    preferred_id
-        .and_then(|id| displays.iter().find(|display| display.id == id))
-        .or_else(|| {
-            main_window_bounds
-                .and_then(|bounds| displays.iter().find(|display| display.bounds == bounds))
-        })
+) -> Option<&DisplayInfo> {
+    main_window_bounds
+        .and_then(|bounds| displays.iter().find(|display| display.bounds == bounds))
         .or_else(|| displays.iter().find(|display| display.primary))
         .or_else(|| displays.first())
-}
-
-pub(crate) fn display_options(displays: &[DisplayInfo]) -> Vec<CaptureDisplayOption> {
-    displays
-        .iter()
-        .enumerate()
-        .map(|(index, display)| CaptureDisplayOption {
-            id: display.id.clone(),
-            label: if display.primary {
-                format!("屏幕 {}（主屏幕）", index + 1)
-            } else {
-                format!("屏幕 {}", index + 1)
-            },
-            width: display.bounds.width,
-            height: display.bounds.height,
-            scale_percent: ((display.dpi_x as f64 / 96.0) * 100.0).round() as u32,
-            primary: display.primary,
-            refresh_rate_hz: display.refresh_rate_hz,
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -82,43 +45,46 @@ mod tests {
     }
 
     #[test]
-    fn explicit_preference_wins_over_main_window_and_primary_display() {
+    fn main_window_display_wins_over_primary_display() {
         let displays = vec![
             display(r"\\.\DISPLAY1", 0, true, 96),
             display(r"\\.\DISPLAY2", -1920, false, 144),
         ];
 
-        let chosen =
-            choose_display(&displays, Some(r"\\.\DISPLAY2"), Some(displays[0].bounds)).unwrap();
+        let chosen = choose_reference_display(&displays, Some(displays[1].bounds)).unwrap();
 
         assert_eq!(chosen.id, r"\\.\DISPLAY2");
     }
 
     #[test]
-    fn disconnected_preference_falls_back_to_main_window_display() {
+    fn missing_main_window_display_falls_back_to_primary() {
         let displays = vec![
             display(r"\\.\DISPLAY1", 0, true, 96),
             display(r"\\.\DISPLAY2", -1920, false, 144),
         ];
 
-        let chosen =
-            choose_display(&displays, Some(r"\\.\DISPLAY3"), Some(displays[1].bounds)).unwrap();
+        let chosen = choose_reference_display(
+            &displays,
+            Some(PhysicalRect {
+                x: 5000,
+                y: 0,
+                width: 800,
+                height: 600,
+            }),
+        )
+        .unwrap();
 
-        assert_eq!(chosen.id, r"\\.\DISPLAY2");
+        assert_eq!(chosen.id, r"\\.\DISPLAY1");
     }
 
     #[test]
-    fn display_options_report_physical_pixels_and_effective_scale() {
+    fn displays_are_ordered_primary_then_by_desktop_position() {
         let displays = ordered_displays(vec![
             display(r"\\.\DISPLAY2", -1920, false, 144),
             display(r"\\.\DISPLAY1", 0, true, 168),
         ]);
 
-        let options = display_options(&displays);
-
-        assert_eq!(options[0].label, "屏幕 1（主屏幕）");
-        assert_eq!(options[0].scale_percent, 175);
-        assert_eq!((options[0].width, options[0].height), (1920, 1080));
-        assert_eq!(options[1].label, "屏幕 2");
+        assert_eq!(displays[0].id, r"\\.\DISPLAY1");
+        assert_eq!(displays[1].id, r"\\.\DISPLAY2");
     }
 }

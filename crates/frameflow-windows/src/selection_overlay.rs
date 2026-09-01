@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use frameflow_capture::PhysicalRect;
+use frameflow_capture::{DisplayInfo, PhysicalRect};
 use windows::{
     core::{w, PCWSTR},
     Win32::{
@@ -56,6 +56,99 @@ enum SessionCommand {
 pub struct NativeSelectionSession {
     control: mpsc::Sender<SessionCommand>,
     worker: Option<JoinHandle<()>>,
+}
+
+/// Owns one native selection surface per connected display until the user
+/// completes or cancels an interaction on one of them. After a display wins,
+/// the other surfaces are stopped and the winning session remains available
+/// for border editing and recording-time locking.
+pub struct NativeDisplaySelectionSession {
+    sessions: Vec<(String, NativeSelectionSession)>,
+    selected_display_id: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DisplayClaim {
+    First,
+    Existing,
+    Rejected,
+}
+
+fn claim_display(selected: &mut Option<String>, display_id: &str, available: bool) -> DisplayClaim {
+    match selected.as_deref() {
+        Some(selected_id) if selected_id == display_id => DisplayClaim::Existing,
+        Some(_) => DisplayClaim::Rejected,
+        None if !available => DisplayClaim::Rejected,
+        None => {
+            *selected = Some(display_id.to_owned());
+            DisplayClaim::First
+        }
+    }
+}
+
+impl NativeDisplaySelectionSession {
+    /// Commits the first display that produces a selection event. Repeated
+    /// updates from that display remain valid; late events from another display
+    /// are ignored.
+    pub fn select_display(&mut self, display_id: &str) -> bool {
+        let available = self.sessions.iter().any(|(id, _)| id == display_id);
+        match claim_display(&mut self.selected_display_id, display_id, available) {
+            DisplayClaim::Existing => return true,
+            DisplayClaim::Rejected => return false,
+            DisplayClaim::First => {}
+        }
+        let mut selected_session = None;
+        for (id, session) in self.sessions.drain(..) {
+            if id == display_id {
+                selected_session = Some((id, session));
+            } else {
+                session.stop();
+            }
+        }
+        self.sessions = selected_session.into_iter().collect();
+        true
+    }
+
+    pub fn lock(&self) -> Result<(), PlatformError> {
+        let (_, session) = self.sessions.first().ok_or_else(|| {
+            PlatformError::WorkerUnavailable("selection surface is unavailable".to_owned())
+        })?;
+        session.lock()
+    }
+
+    pub fn stop(self) {
+        drop(self);
+    }
+}
+
+pub fn start_native_display_selection<F>(
+    displays: &[DisplayInfo],
+    on_selected: F,
+) -> Result<NativeDisplaySelectionSession, PlatformError>
+where
+    F: Fn(DisplayInfo, Option<PhysicalRect>) + Send + Sync + 'static,
+{
+    if displays.is_empty() {
+        return Err(PlatformError::WorkerUnavailable(
+            "no display is available for selection".to_owned(),
+        ));
+    }
+
+    let callback = std::sync::Arc::new(on_selected);
+    let mut sessions = Vec::with_capacity(displays.len());
+    for display in displays {
+        let callback = std::sync::Arc::clone(&callback);
+        let callback_display = display.clone();
+        let session = start_native_selection(display.bounds, move |selection| {
+            callback(callback_display.clone(), selection);
+        })?;
+        sessions.push((display.id.clone(), session));
+    }
+
+    Ok(NativeDisplaySelectionSession {
+        sessions,
+        selected_display_id: None,
+    })
 }
 
 impl NativeSelectionSession {
@@ -165,11 +258,18 @@ struct MaskResources {
     class_name: Vec<u16>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SelectionVisualLayout {
     FullMask,
-    Selection(PhysicalRect),
+    SmartSelection(PhysicalRect),
+    FreeSelection(PhysicalRect),
     Hidden,
+}
+
+impl SelectionVisualLayout {
+    fn uses_fullscreen_input_mask(self) -> bool {
+        matches!(self, Self::FreeSelection(_))
+    }
 }
 
 impl OverlayState {
@@ -178,6 +278,14 @@ impl OverlayState {
             Some(rect_from_points(self.origin?, self.current?))
         } else {
             self.hovered
+        }
+    }
+
+    fn visual_layout(&self) -> SelectionVisualLayout {
+        match (self.dragging, self.selection()) {
+            (true, Some(selection)) => SelectionVisualLayout::FreeSelection(selection),
+            (false, Some(selection)) => SelectionVisualLayout::SmartSelection(selection),
+            _ => SelectionVisualLayout::FullMask,
         }
     }
 
@@ -342,15 +450,9 @@ fn run_overlay<F>(
             return;
         }
     };
-    let mut preview_selection = overlay_state
-        .selection()
-        .filter(|selection| selection.width > 0 && selection.height > 0);
+    let mut visual_layout = overlay_state.visual_layout();
     unsafe {
-        let layout = preview_selection.map_or(
-            SelectionVisualLayout::FullMask,
-            SelectionVisualLayout::Selection,
-        );
-        let _ = layout_selection_visuals(&mask, &preview, layout);
+        let _ = layout_selection_visuals(&mask, &preview, visual_layout);
     }
     let _ = startup.send(Ok(()));
 
@@ -383,18 +485,23 @@ fn run_overlay<F>(
                     }
                 }
             } else {
-                let next_preview = overlay_state
-                    .selection()
-                    .filter(|selection| selection.width > 0 && selection.height > 0);
-                if next_preview != preview_selection {
+                let next_layout = overlay_state.visual_layout();
+                if next_layout != visual_layout {
                     unsafe {
-                        let layout = next_preview.map_or(
-                            SelectionVisualLayout::FullMask,
-                            SelectionVisualLayout::Selection,
-                        );
-                        let _ = layout_selection_visuals(&mask, &preview, layout);
+                        if next_layout.uses_fullscreen_input_mask()
+                            != visual_layout.uses_fullscreen_input_mask()
+                        {
+                            let alpha = if next_layout.uses_fullscreen_input_mask() {
+                                SELECTION_MASK_ALPHA
+                            } else {
+                                1
+                            };
+                            let _ =
+                                SetLayeredWindowAttributes(overlay, COLORREF(0), alpha, LWA_ALPHA);
+                        }
+                        let _ = layout_selection_visuals(&mask, &preview, next_layout);
                     }
-                    preview_selection = next_preview;
+                    visual_layout = next_layout;
                 }
             }
         } else if let Some(selection) = borders
@@ -673,7 +780,9 @@ unsafe fn layout_selection_visuals(
         return false;
     };
     let mask_rects = match layout {
-        SelectionVisualLayout::FullMask | SelectionVisualLayout::Hidden => [
+        SelectionVisualLayout::FullMask
+        | SelectionVisualLayout::FreeSelection(_)
+        | SelectionVisualLayout::Hidden => [
             (
                 mask.display.x,
                 mask.display.y,
@@ -684,14 +793,16 @@ unsafe fn layout_selection_visuals(
             (mask.display.x, mask.display.y, 1, 1),
             (mask.display.x, mask.display.y, 1, 1),
         ],
-        SelectionVisualLayout::Selection(selection) => mask_rectangles(mask.display, selection),
+        SelectionVisualLayout::SmartSelection(selection) => {
+            mask_rectangles(mask.display, selection)
+        }
     };
     for (index, (window, (x, y, width, height))) in mask.windows.iter().zip(mask_rects).enumerate()
     {
         let visible = match layout {
             SelectionVisualLayout::FullMask => index == 0,
-            SelectionVisualLayout::Selection(_) => width > 0 && height > 0,
-            SelectionVisualLayout::Hidden => false,
+            SelectionVisualLayout::SmartSelection(_) => width > 0 && height > 0,
+            SelectionVisualLayout::FreeSelection(_) | SelectionVisualLayout::Hidden => false,
         };
         let Ok(next) = DeferWindowPos(
             batch,
@@ -715,7 +826,8 @@ unsafe fn layout_selection_visuals(
     }
     for (window, role) in &preview.windows {
         let (x, y, width, height, visible) = match layout {
-            SelectionVisualLayout::Selection(selection) => {
+            SelectionVisualLayout::SmartSelection(selection)
+            | SelectionVisualLayout::FreeSelection(selection) => {
                 let (x, y, width, height) = window_rect(preview.display, selection, *role);
                 (x, y, width, height, true)
             }
@@ -1243,6 +1355,10 @@ mod tests {
 
         state.update_drag((304, 303));
         assert_eq!(state.selection(), Some(candidate));
+        assert_eq!(
+            state.visual_layout(),
+            SelectionVisualLayout::SmartSelection(candidate)
+        );
         state.finish_pointer_action((304, 303));
         assert_eq!(state.completed, Some(candidate));
     }
@@ -1273,6 +1389,7 @@ mod tests {
         state.update_drag((305, 420));
 
         assert!(state.dragging);
+        assert!(state.visual_layout().uses_fullscreen_input_mask());
         assert_eq!(
             state.selection(),
             Some(PhysicalRect {
@@ -1373,5 +1490,35 @@ mod tests {
             DragMode::Left
         );
         assert_eq!(drag_mode(BorderRole::Move, 0, 0, selection), DragMode::Move);
+    }
+
+    #[test]
+    fn first_available_display_claim_wins_and_remains_stable() {
+        let mut selected = None;
+
+        assert_eq!(
+            claim_display(&mut selected, r"\\.\DISPLAY2", true),
+            DisplayClaim::First
+        );
+        assert_eq!(selected.as_deref(), Some(r"\\.\DISPLAY2"));
+        assert_eq!(
+            claim_display(&mut selected, r"\\.\DISPLAY2", true),
+            DisplayClaim::Existing
+        );
+        assert_eq!(
+            claim_display(&mut selected, r"\\.\DISPLAY1", true),
+            DisplayClaim::Rejected
+        );
+    }
+
+    #[test]
+    fn unavailable_display_cannot_claim_selection() {
+        let mut selected = None;
+
+        assert_eq!(
+            claim_display(&mut selected, r"\\.\DISPLAY3", false),
+            DisplayClaim::Rejected
+        );
+        assert_eq!(selected, None);
     }
 }

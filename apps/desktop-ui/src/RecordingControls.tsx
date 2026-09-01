@@ -144,17 +144,35 @@ export function RecordingControls() {
     : stats?.videoEncoder.hardwareAccelerated === false
       ? "软件 H.264"
       : "H.264";
+  const statsLabel = [
+    `${stats?.frameCount ?? 0} 帧`,
+    `${(stats?.effectiveFps ?? 0).toFixed(1)} FPS`,
+    (stats?.droppedFrames ?? 0) > 0 ? `丢 ${stats?.droppedFrames} 帧` : null,
+    (stats?.audio?.droppedPackets ?? 0) > 0
+      ? `音频丢 ${stats?.audio?.droppedPackets} 包`
+      : null,
+    `${encoderLabel}${stats?.audio ? "/AAC" : ""} MP4`,
+  ].filter(Boolean).join(" · ");
+  const statusMessage = error
+    ?? stats?.lastError
+    ?? storageWarning?.message
+    ?? audioWarning
+    ?? stats?.audio?.warning;
+  const statusIsWarning = !error
+    && !stats?.lastError
+    && storageWarning?.health !== "critical"
+    && storageWarning?.health !== "unavailable";
 
   return (
     <main className="recording-controls-shell">
       <div className="recording-controls-bar">
         <span className="recording-state"><i />{stopping ? "正在保存" : phase === "paused" ? "已暂停" : "录制中"}</span>
         <strong>{formatElapsed(stats?.elapsedMs ?? 0)}</strong>
-        <small title={stats?.videoEncoder.name}>
-          {stats?.frameCount ?? 0} 帧 · {(stats?.effectiveFps ?? 0).toFixed(1)} FPS
-          {(stats?.droppedFrames ?? 0) > 0 ? ` · 丢 ${stats?.droppedFrames} 帧` : ""}
-          {(stats?.audio?.droppedPackets ?? 0) > 0 ? ` · 音频丢 ${stats?.audio?.droppedPackets} 包` : ""}
-          {` · ${encoderLabel}${stats?.audio ? "/AAC" : ""} MP4`}
+        <small
+          className={statusMessage ? `recording-controls-message${statusIsWarning ? " warning" : ""}` : undefined}
+          title={statusMessage ?? `${statsLabel}${stats?.videoEncoder.name ? ` · ${stats.videoEncoder.name}` : ""}`}
+        >
+          {statusMessage ?? statsLabel}
         </small>
         {systemAudio?.enabled && (
           <button className={`audio-control ${systemAudio.muted ? "muted" : ""}`} disabled={stopping || systemAudio.disconnected} title={systemAudio.disconnected ? "系统声音设备已断开" : systemAudio.muted ? "恢复系统声音" : "静音系统声音"} onClick={() => void toggleMute("systemAudio", systemAudio)}>
@@ -176,11 +194,6 @@ export function RecordingControls() {
           <Square size={14} />{stopping ? "保存中…" : "停止并保存"}
         </button>
       </div>
-      {(error || stats?.lastError || storageWarning || audioWarning || stats?.audio?.warning) && (
-        <div className={`recording-controls-error ${!error && !stats?.lastError && storageWarning?.health !== "critical" && storageWarning?.health !== "unavailable" ? "warning" : ""}`}>
-          {error ?? stats?.lastError ?? storageWarning?.message ?? audioWarning ?? stats?.audio?.warning}
-        </div>
-      )}
     </main>
   );
 }

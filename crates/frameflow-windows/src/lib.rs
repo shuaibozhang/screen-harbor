@@ -21,7 +21,10 @@ pub use audio_mixer::{
 pub use display_watcher::{watch_display_changes, DisplayChangeSession};
 pub use displays::{enable_per_monitor_v2_dpi, list_displays};
 pub use media_foundation::VideoEncoderInfo;
-pub use selection_overlay::{start_native_selection, NativeSelectionSession};
+pub use selection_overlay::{
+    start_native_display_selection, start_native_selection, NativeDisplaySelectionSession,
+    NativeSelectionSession,
+};
 pub use shell::{choose_recording_directory, move_paths_to_recycle_bin};
 pub use wasapi_loopback::{
     start_microphone_capture, start_system_audio_loopback, start_wasapi_capture,

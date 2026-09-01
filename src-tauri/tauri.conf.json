@@ -40,7 +40,7 @@
         "title": "FrameFlow 录制控制",
         "url": "index.html?window=recording-controls",
         "width": 680,
-        "height": 76,
+        "height": 56,
         "visible": false,
         "decorations": false,
         "transparent": false,

@@ -44,8 +44,6 @@ button:disabled { cursor: not-allowed; opacity: .6; }
 .start-button:hover { background: rgba(255,255,255,.1); }
 .record-dot { width: 10px; height: 10px; border: 2px solid white; border-radius: 50%; background: #ff5d5d; box-shadow: 0 0 0 2px rgba(255,255,255,.18); }
 .start-area small { color: #7b8493; font-size: 11px; }
-.display-picker select { max-width: 280px; height: 34px; padding: 0 30px 0 10px; border: 1px solid #d9dfe8; color: #455166; background: #fff; border-radius: 9px; font: inherit; font-size: 11px; cursor: pointer; }
-.display-picker select:disabled { cursor: wait; opacity: .62; }
 .section { margin-top: 20px; }
 .section-heading { height: 28px; display: flex; align-items: flex-start; justify-content: space-between; padding: 0 3px; }
 .section-heading h2 { margin: 0; color: #667084; font-size: 12px; font-weight: 700; letter-spacing: .04em; }
@@ -176,7 +174,6 @@ button.row:hover { border-color: #ccd4e4; background: #fbfcfe; }
   .hero p, .start-area small, .section-heading h2, .row-copy small { color: #9ca6b5; }
   .interrupted-notice { color: #e4bb73; background: #3b3529; border-color: #5d5036; }
   .interrupted-icon { color: #e4bb73; background: #433a29 !important; }
-  .display-picker select { border-color: #46505e; color: #dce3ed; background: #303741; }
   .rows, .row { border-color: #343b46; background: #282e37; }
   .rows .row + .row { border-color: #363e49; }
   button.row:hover { border-color: #4b5665; background: #2d343e; }

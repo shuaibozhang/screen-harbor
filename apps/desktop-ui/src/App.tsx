@@ -7,7 +7,6 @@ import {
   Folder,
   FolderOpen,
   Mic2,
-  Monitor,
   MonitorSpeaker,
   Search,
   Settings2,
@@ -86,7 +85,7 @@ function formatFileSize(bytes: number) {
 }
 
 export function App() {
-  const { snapshot, loading, error, hydrate, startSelection, updateOutputSettings, updateAudioInput, updateCaptureDisplay, updateSaveDirectory } = useAppStore();
+  const { snapshot, loading, error, hydrate, startSelection, updateOutputSettings, updateAudioInput, updateSaveDirectory } = useAppStore();
   const [finalizationError, setFinalizationError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [draftFps, setDraftFps] = useState(30);
@@ -99,7 +98,6 @@ export function App() {
   const [customPreviewHeight, setCustomPreviewHeight] = useState(480);
   const [savingSettings, setSavingSettings] = useState(false);
   const [savingAudio, setSavingAudio] = useState<"microphone" | "systemAudio" | null>(null);
-  const [savingCaptureDisplay, setSavingCaptureDisplay] = useState(false);
   const [showAllRecordings, setShowAllRecordings] = useState(false);
   const [openingRecording, setOpeningRecording] = useState<string | null>(null);
   const [retryingPreview, setRetryingPreview] = useState<string | null>(null);
@@ -165,7 +163,7 @@ export function App() {
     });
     void listen<DisplayChangeEvent>("display://changed", (event) => {
       if (event.payload.selectionCancelled) {
-        setFinalizationError("录制屏幕已断开，本轮框选已安全取消。请重新选择可用屏幕。");
+        setFinalizationError("显示器配置发生变化，本轮框选已安全取消。请重新开始框选。");
       }
       void hydrate();
     }).then((dispose) => {
@@ -271,16 +269,6 @@ export function App() {
       await updateAudioInput(source, enabled);
     } finally {
       setSavingAudio(null);
-    }
-  };
-
-  const selectCaptureDisplay = async (displayId: string) => {
-    if (displayId === snapshot.selectedCaptureDisplayId) return;
-    setSavingCaptureDisplay(true);
-    try {
-      await updateCaptureDisplay(displayId);
-    } finally {
-      setSavingCaptureDisplay(false);
     }
   };
 
@@ -473,8 +461,8 @@ export function App() {
             </div>
             <small>
               {snapshot.globalShortcutAvailable
-                ? "区域录制 · Alt + Shift + R"
-                : "区域录制 · 快捷键被其他应用占用"}
+                ? "开始后在任意屏幕框选 · Alt + Shift + R"
+                : "开始后在任意屏幕框选 · 快捷键被其他应用占用"}
             </small>
           </div>
         </section>
@@ -502,29 +490,6 @@ export function App() {
             </span>
             <ChevronRight size={18} />
           </button>
-        </section>
-
-        <section className="section" aria-labelledby="display-heading">
-          <div className="section-heading"><h2 id="display-heading">录制屏幕</h2></div>
-          <label className="row display-picker">
-            <span className="row-icon"><Monitor size={19} /></span>
-            <span className="row-copy">
-              <strong>框选所在屏幕</strong>
-              <small>录制范围不会跨越两块显示器</small>
-            </span>
-            <select
-              aria-label="选择录制屏幕"
-              value={snapshot.selectedCaptureDisplayId}
-              disabled={savingCaptureDisplay || snapshot.recordingState !== "idle"}
-              onChange={(event) => void selectCaptureDisplay(event.currentTarget.value)}
-            >
-              {snapshot.captureDisplays.map((display) => (
-                <option key={display.id} value={display.id}>
-                  {display.label} · {display.width}×{display.height} · {display.scalePercent}%{display.refreshRateHz ? ` · ${display.refreshRateHz} Hz` : ""}
-                </option>
-              ))}
-            </select>
-          </label>
         </section>
 
         <section className="section" aria-labelledby="input-heading">

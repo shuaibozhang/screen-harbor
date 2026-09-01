@@ -67,20 +67,8 @@ export interface AppSnapshot {
   supportedCaptureFps: number[];
   monitorRefreshRateHz?: number;
   recommendedCaptureFps: number;
-  captureDisplays: CaptureDisplay[];
-  selectedCaptureDisplayId: string;
   recentRecordings: RecentRecording[];
   interruptedRecordings: InterruptedRecording[];
-}
-
-export interface CaptureDisplay {
-  id: string;
-  label: string;
-  width: number;
-  height: number;
-  scalePercent: number;
-  primary: boolean;
-  refreshRateHz?: number;
 }
 
 export interface DisplayChangeEvent {
