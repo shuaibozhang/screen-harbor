@@ -23,7 +23,9 @@ use frameflow_core::{
     OutputConfig, OutputFormat, OutputResolution, RecordingAction, RecordingState,
     RecordingStateMachine, Resolution,
 };
-use frameflow_media::{CoverJob, MediaJob, MediaWorkerClient, PreviewFormat, PreviewJob};
+use frameflow_media::{
+    CoverJob, CoverOutput, MediaJob, MediaWorkerClient, PreviewFormat, PreviewJob,
+};
 use frameflow_recorder::{
     AudioInputConfig, AudioInputSource, CaptureEngineEvent, CaptureOutputSize, CaptureStats,
     CaptureWorkerClient, FinalizedCapture,
@@ -1543,10 +1545,18 @@ fn run_media_scheduler(app: tauri::AppHandle, receiver: mpsc::Receiver<MediaJobS
             }),
             MediaJobSpec::Cover(job) => MediaJob::Cover(CoverJob {
                 input_path: job.input_path.clone(),
-                temporary_path: job.temporary_path.clone(),
-                output_path: job.output_path.clone(),
-                maximum_width: 480,
-                maximum_height: 270,
+                preview: CoverOutput {
+                    temporary_path: job.preview_temporary_path.clone(),
+                    output_path: job.preview_output_path.clone(),
+                    maximum_width: 320,
+                    maximum_height: 180,
+                },
+                high_resolution: CoverOutput {
+                    temporary_path: job.high_temporary_path.clone(),
+                    output_path: job.high_output_path.clone(),
+                    maximum_width: 1920,
+                    maximum_height: 1080,
+                },
                 position_ms: job.position_ms,
             }),
         };

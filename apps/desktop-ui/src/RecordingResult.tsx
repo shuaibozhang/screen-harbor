@@ -96,7 +96,11 @@ export function RecordingResult({
             <video
               key={playable.path}
               src={convertFileSrc(playable.path)}
-              poster={details.cover.status === "completed" && details.cover.path ? convertFileSrc(details.cover.path) : undefined}
+              poster={details.highResolutionCover.status === "completed" && details.highResolutionCover.path
+                ? convertFileSrc(details.highResolutionCover.path)
+                : details.cover.status === "completed" && details.cover.path
+                  ? convertFileSrc(details.cover.path)
+                  : undefined}
               controls
               preload="metadata"
             />
@@ -129,8 +133,8 @@ export function RecordingResult({
           </article>
 
 
-          <article className={`artifact-card cover-card ${details.cover.status}`}>
-            <header><strong>静态封面</strong><span><StatusIcon artifact={details.cover} />{statusText(details.cover)}</span></header>
+          <article className={`artifact-card ${details.cover.status}`}>
+            <header><strong>预览封面</strong><span><StatusIcon artifact={details.cover} />{statusText(details.cover)}</span></header>
             <p>{details.cover.width && details.cover.height ? `${details.cover.width}×${details.cover.height}` : "分辨率未知"} · {formatBytes(details.cover.fileSizeBytes)}</p>
             {details.cover.status === "failed" ? (
               <div className="artifact-failure">
@@ -140,7 +144,22 @@ export function RecordingResult({
                 </button>
               </div>
             ) : (
-              <small>用于录制列表缩略图，在预览完成后自动生成。</small>
+              <small>WebP 小图，用于录制列表和快速加载。</small>
+            )}
+          </article>
+
+          <article className={`artifact-card ${details.highResolutionCover.status}`}>
+            <header><strong>高清封面</strong><span><StatusIcon artifact={details.highResolutionCover} />{statusText(details.highResolutionCover)}</span></header>
+            <p>{details.highResolutionCover.width && details.highResolutionCover.height ? `${details.highResolutionCover.width}×${details.highResolutionCover.height}` : "分辨率未知"} · {formatBytes(details.highResolutionCover.fileSizeBytes)}</p>
+            {details.highResolutionCover.status === "failed" ? (
+              <div className="artifact-failure">
+                <small>{details.highResolutionCover.error ?? "高清封面生成失败，视频文件不受影响。"}</small>
+                <button type="button" disabled={retryingCover} onClick={onRetryCover}>
+                  <RotateCcw size={14} />{retryingCover ? "正在重试…" : "重试双封面"}
+                </button>
+              </div>
+            ) : (
+              <small>WebP 高清图，最高 1920×1080，用于播放器封面和导出。</small>
             )}
           </article>
         </div>

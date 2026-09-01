@@ -11,7 +11,7 @@
 - 每次新录制写入独立的 `FrameFlow-<id>/` 录制组目录；`main.mp4` 是高清母版，完成后写入版本化 `recording.json`，记录母版、预览和封面的独立路径与状态。SQLite v2 仅作为可重建索引，manifest 与正式媒体文件是事实来源；应用启动时自动扫描并对账。
 - 保存位置由 `storage.json` 持久化，录制启动前执行目录创建、真实写入和剩余空间校验。当前输出目录与媒体库历史根目录分离：切换位置不移动旧文件，也不隐藏旧录像；暂时离线的历史磁盘不会触发索引误删。
 - `frameflow-recorder` 是不依赖 Tauri 的录制引擎边界，统一拥有 WGC、WASAPI、混音、暂停/恢复、实时静音、统计和 MP4 收尾。主程序以同一个 `frameflow.exe --capture-worker` 启动独立录制进程，通过两条 Windows 单向命名管道承载带协议版本和请求 ID 的 JSON Lines 控制协议；Tauri 层只负责窗口、状态机和事件转发。
-- `frameflow-media` 提供与采集完全分离的一次性 Media Worker 协议。母版完成后，主进程将预览任务放入有界单消费者队列；`frameflow.exe --media-worker` 以低优先级调用 FFmpeg，可按设置生成 H.264/AAC MP4 或 VP9/Opus WebM，预览分辨率支持 480p、720p、1080p 与自定义上限，固定 15 FPS。任务串行运行，失败仅更新预览状态，不改变母版，也不会占用 Capture Worker。
+- `frameflow-media` 提供与采集完全分离的一次性 Media Worker 协议。母版完成后，主进程将预览任务放入有界单消费者队列；`frameflow.exe --media-worker` 以低优先级调用 FFmpeg，可按设置生成 H.264/AAC MP4 或 VP9/Opus WebM，预览分辨率提供 240p、360p、480p 与自定义上限，固定 15 FPS。任务串行运行，失败仅更新预览状态，不改变母版，也不会占用 Capture Worker。
 - 进程启动时启用 Per-Monitor V2 DPI。原生选区、WGC 裁剪和基础画布统一使用物理像素；DPI 只影响界面布局与坐标换算，不决定成片分辨率。输出层采用 OBS 式独立策略，默认保留原始物理分辨率，也可选择最高 1080p、720p 或自定义边界，由 D3D11 视频处理器等比缩小且绝不放大。
 - 原生选区专用线程会再次显式固定为 Per-Monitor V2，避免 WebView/Tauri 调用线程的临时 DPI 上下文将鼠标和边框坐标虚拟化为逻辑像素。
 - 框选阶段使用近乎不可见的 Win32 原生输入层接收鼠标，并用四个独立原生窗口实时绘制选区预览。完成框选后销毁输入层，只保留可编辑窄边框和移动手柄；支持整体移动及八方向缩放，录制开始后锁定为点击穿透。
@@ -59,10 +59,10 @@
 - 录制索引已升级为 Recording Group / SQLite v2：新录制使用独立目录和 `recording.json`，母版、预览拥有独立状态；SQLite v1 自动原位迁移，旧版根目录单 MP4 不移动并标记为“未请求预览”。旧配置中的未实现格式会安全迁移到 MP4/H.264；MP4/WebM 和有效分辨率设置会原样保留。
 - 独立轻量预览管线已经接入：状态按 Pending → Processing → Completed/Failed 同步写入 manifest 与 SQLite，MP4 与 WebM 均先写对应 `.part` 再原子发布；应用启动会恢复未完成队列，失败项可在最近录制中重试。每个 Recording Group 在完成母版时冻结本轮预览格式、分辨率、帧率与音频配置，之后排队、恢复和重试不会被全局设置变化覆盖。Media Worker 缺失、崩溃或编码失败只影响预览。
 - 录制结果页已接入录制组详情 API：录制完成后自动展示，最近录制也可重新进入；播放器优先使用轻量预览，预览生成中或失败时回退到高清母版。母版与预览分别展示实际编码尺寸、FPS、时长、文件大小和处理状态，并提供打开位置与失败重试。WebView 通过 Tauri Asset Protocol 播放本地 MP4，权限仅开放 `$VIDEO/FrameFlow/**`。
-- 静态 JPG 封面已纳入统一 Media Worker 作业协议：预览完成后从预览视频确定性取帧，预览失败时独立回退到高清母版；`cover.jpg.part` 原子发布为 `cover.jpg`，应用启动恢复中断作业，失败可单独重试。最近录制使用封面缩略图，结果页播放器使用封面作为 poster，母版和预览状态均不受封面失败影响。
+- 双 WebP 封面已纳入统一 Media Worker 作业协议：始终从高清母版的同一时间点生成最高 320×180 的 `cover-preview.webp` 与最高 1920×1080 的 `cover-high.webp`，均先写 `.part` 再原子发布。小图用于录制列表，高清图优先作为结果页播放器 poster；应用启动恢复中断作业，失败可统一重试，母版和预览状态不受影响。旧录制的单张 JPG 封面继续兼容。
 - 录制库已支持名称搜索、全选当前结果、单条选择和批量清理。删除目标由后端根据 SQLite 与 manifest 解析并校验：新录制以整个 Recording Group 为边界，旧录制以单个 MP4 为边界；所有目标经同一次 Windows Shell 操作移入回收站，成功后再用事务同步索引。媒体产物仍在生成时拒绝删除，确认框明确说明母版、预览和封面将一起处理。
 - 首页保存位置已接入原生 Windows 文件夹选择器；仅空闲时允许切换，选择取消不改变设置，低于 512 MB、不可创建或不可写的目录会被拒绝。首页同时展示当前可用空间，用户明确选择和历史登记的目录会同步加入 Tauri Asset Protocol 运行时白名单，结果页可继续播放其中的母版与预览。
-- Windows 安装包已内置固定版本的 FFmpeg 9.0 LGPL shared 运行时。供应脚本固定 BtbN 发布标签、归档 SHA-256 和每个运行时文件哈希，拒绝 `--enable-gpl`/`--enable-nonfree`，并验证 `h264_mf`、`aac_mf`、`mjpeg`。安装资源同时包含 LGPLv3 文本、对应 FFmpeg 源码、BtbN 构建配方和第三方声明；设置页展示 FFmpeg/LGPL 使用说明。Media Worker 优先发现安装包内运行时，开发机安装仅作为后备。
+- Windows 安装包已内置固定版本的 FFmpeg 9.0 LGPL shared 运行时。供应脚本固定 BtbN 发布标签、归档 SHA-256 和每个运行时文件哈希，拒绝 `--enable-gpl`/`--enable-nonfree`，并验证 `h264_mf`、`aac_mf`、`libvpx-vp9`、`libopus` 与 `libwebp`。安装资源同时包含 LGPLv3 文本、对应 FFmpeg 源码、BtbN 构建配方和第三方声明；设置页展示 FFmpeg/LGPL 使用说明。Media Worker 优先发现安装包内运行时，开发机安装仅作为后备。
 - SQLite 录制索引使用 `OnceLock<Result<...>>` 惰性一次初始化；Tauri `setup` 与 WebView 首次 hydrate 并发时共享同一初始化结果，不再暴露短暂的“索引未初始化”状态。首页加载失败会显示错误与重新加载入口，不再永久停留在空白加载壳。
 - 录制控制条通过后端状态快照完成初始化，并采用单飞异步轮询读取 Worker 统计；窗口显示前丢失状态事件或 Worker 请求变慢时，不再停在 0 秒或堆积并发请求阻塞停止操作。
 - Capture Worker 使用每次录制随机生成、拒绝远程客户端的两条 Windows 单向命名管道传输控制协议：命令与响应各自使用独立内核对象，避免同步全双工读写互相阻塞。stdout/stderr 仅用于日志，媒体组件产生的非 UTF-8 输出无法再污染 JSON。
@@ -82,7 +82,7 @@
 
 ## 当前开发切片
 
-Recording Group、独立 MP4 预览管线、静态 JPG 封面、结果页、可恢复录制库管理和带 LGPL FFmpeg 的 NSIS 安装包已经落地。干净环境安装/卸载与代码签名按用户决定暂缓；多显示器选择和混合 DPI 窗口布局的实现与自动化坐标模型已完成，仍需在具有不同缩放比例的真实双屏环境验收。
+Recording Group、可配置 MP4/WebM 预览管线、双 WebP 封面、结果页、可恢复录制库管理和带 LGPL FFmpeg 的 NSIS 安装包已经落地。干净环境安装/卸载与代码签名按用户决定暂缓；多显示器选择和混合 DPI 窗口布局的实现与自动化坐标模型已完成，仍需在具有不同缩放比例的真实双屏环境验收。
 
 录制开始时锁定本轮音频设备；设备中途断开后仅将对应输入降级为静音并提示，视频继续录制，下次录制重新读取默认设备。当前产品不引入录制中的设备热切换和音频电平显示。
 
@@ -110,9 +110,10 @@ WASAPI 捕获线程每 100 ms 在无采样事件时主动查询共享模式客�
 
 ## 验证证据（2026-09-01）
 
-- 预览设置已支持 MP4（H.264/AAC）与 WebM（VP9/Opus），分辨率支持 480p、720p、1080p 和 2×2 至 3840×2160 的自定义上限；设置只影响之后完成的录制，并按 Recording Group 固化到 manifest。
+- 预览设置已支持 MP4（H.264/AAC）与 WebM（VP9/Opus），分辨率预设为 240p、360p、480p，并保留 2×2 至 3840×2160 的自定义上限；设置只影响之后完成的录制，并按 Recording Group 固化到 manifest。
 - Media Worker 真实 WebM 探针通过：640×360、30 FPS、带音频的 2 秒 MP4 母版生成 640×360、15 FPS VP9 + Opus WebM，完整解码成功，产物约 168 KiB。
-- Rust 工作区 109 项测试、Clippy 零警告、TypeScript 类型检查、前端测试、录制验收器及生产构建通过；固定 FFmpeg 运行时已验证包含 `h264_mf`、`aac_mf`、`libvpx-vp9`、`libopus` 与 `mjpeg`。
+- Media Worker 真实双封面探针通过：从 1920×1080 H.264 母版的同一时间点生成 320×180 WebP 预览封面（3,020 字节）与 1920×1080 WebP 高清封面（46,006 字节），两张均完整解码成功，探针文件已清理。
+- Rust 工作区 109 项测试、Clippy 零警告、TypeScript 类型检查、前端测试、录制验收器及生产构建通过；固定 FFmpeg 运行时已验证包含 `h264_mf`、`aac_mf`、`libvpx-vp9`、`libopus` 与 `libwebp`。
 
 ## 验证证据（2026-08-31）
 

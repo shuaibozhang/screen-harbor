@@ -49,6 +49,7 @@ export interface RecordingDetails {
   main: RecordingArtifact;
   preview: RecordingArtifact;
   cover: RecordingArtifact;
+  highResolutionCover: RecordingArtifact;
 }
 
 export interface AppSnapshot {

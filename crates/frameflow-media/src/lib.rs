@@ -9,7 +9,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-const MEDIA_WORKER_PROTOCOL_VERSION: u16 = 2;
+const MEDIA_WORKER_PROTOCOL_VERSION: u16 = 3;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -44,11 +44,18 @@ pub struct PreviewJob {
 #[serde(rename_all = "camelCase")]
 pub struct CoverJob {
     pub input_path: PathBuf,
+    pub preview: CoverOutput,
+    pub high_resolution: CoverOutput,
+    pub position_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverOutput {
     pub temporary_path: PathBuf,
     pub output_path: PathBuf,
     pub maximum_width: u32,
     pub maximum_height: u32,
-    pub position_ms: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -195,18 +202,36 @@ pub fn run_preview_job(job: &PreviewJob) -> Result<(), String> {
 pub fn run_cover_job(job: &CoverJob) -> Result<(), String> {
     validate_cover_job(job)?;
     let ffmpeg = resolve_ffmpeg()?;
-    if job.temporary_path.exists() {
-        fs::remove_file(&job.temporary_path)
-            .map_err(|error| format!("failed to remove stale cover: {error}"))?;
+    for output in [&job.preview, &job.high_resolution] {
+        if output.temporary_path.exists() {
+            fs::remove_file(&output.temporary_path)
+                .map_err(|error| format!("failed to remove stale cover: {error}"))?;
+        }
     }
+    for cover in [&job.preview, &job.high_resolution] {
+        if let Err(error) = run_cover_encoder(&ffmpeg, job, cover) {
+            let _ = fs::remove_file(&job.preview.temporary_path);
+            let _ = fs::remove_file(&job.high_resolution.temporary_path);
+            return Err(error);
+        }
+    }
+    publish_file(
+        &job.high_resolution.temporary_path,
+        &job.high_resolution.output_path,
+    )
+    .map_err(|error| format!("failed to publish high-resolution cover: {error}"))?;
+    publish_file(&job.preview.temporary_path, &job.preview.output_path)
+        .map_err(|error| format!("failed to publish preview cover: {error}"))
+}
+
+fn run_cover_encoder(ffmpeg: &Path, job: &CoverJob, cover: &CoverOutput) -> Result<(), String> {
     let mut command = Command::new(ffmpeg);
-    command.args(cover_ffmpeg_arguments(job));
+    command.args(cover_ffmpeg_arguments(job, cover));
     hide_console_window(&mut command);
     let output = command
         .output()
         .map_err(|error| format!("failed to start FFmpeg cover generator: {error}"))?;
     if !output.status.success() {
-        let _ = fs::remove_file(&job.temporary_path);
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         return Err(if stderr.is_empty() {
             format!("FFmpeg cover generator exited with {}", output.status)
@@ -214,14 +239,12 @@ pub fn run_cover_job(job: &CoverJob) -> Result<(), String> {
             format!("FFmpeg cover generator failed: {stderr}")
         });
     }
-    let metadata = fs::metadata(&job.temporary_path)
-        .map_err(|error| format!("FFmpeg did not create a cover file: {error}"))?;
+    let metadata = fs::metadata(&cover.temporary_path)
+        .map_err(|error| format!("FFmpeg did not create a WebP cover: {error}"))?;
     if metadata.len() == 0 {
-        let _ = fs::remove_file(&job.temporary_path);
-        return Err("FFmpeg created an empty cover file".to_owned());
+        return Err("FFmpeg created an empty WebP cover".to_owned());
     }
-    publish_file(&job.temporary_path, &job.output_path)
-        .map_err(|error| format!("failed to publish cover file: {error}"))
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -305,31 +328,51 @@ fn validate_cover_job(job: &CoverJob) -> Result<(), String> {
     if !job.input_path.is_file() {
         return Err("cover input is missing".to_owned());
     }
-    if job.maximum_width < 2 || job.maximum_height < 2 {
-        return Err("cover profile is invalid".to_owned());
-    }
     let input_parent = job
         .input_path
         .parent()
         .ok_or_else(|| "cover input has no recording group".to_owned())?
         .canonicalize()
         .map_err(|error| error.to_string())?;
-    for path in [&job.temporary_path, &job.output_path] {
-        let parent = path
-            .parent()
-            .ok_or_else(|| "cover output has no recording group".to_owned())?
-            .canonicalize()
-            .map_err(|error| error.to_string())?;
-        if parent != input_parent {
-            return Err("cover files must stay inside the recording group".to_owned());
+    for output in [&job.preview, &job.high_resolution] {
+        if output.maximum_width < 2 || output.maximum_height < 2 {
+            return Err("cover profile is invalid".to_owned());
+        }
+        for path in [&output.temporary_path, &output.output_path] {
+            let parent = path
+                .parent()
+                .ok_or_else(|| "cover output has no recording group".to_owned())?
+                .canonicalize()
+                .map_err(|error| error.to_string())?;
+            if parent != input_parent {
+                return Err("cover files must stay inside the recording group".to_owned());
+            }
         }
     }
     if job
+        .preview
         .temporary_path
         .file_name()
         .and_then(|name| name.to_str())
-        != Some("cover.jpg.part")
-        || job.output_path.file_name().and_then(|name| name.to_str()) != Some("cover.jpg")
+        != Some("cover-preview.webp.part")
+        || job
+            .preview
+            .output_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some("cover-preview.webp")
+        || job
+            .high_resolution
+            .temporary_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some("cover-high.webp.part")
+        || job
+            .high_resolution
+            .output_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some("cover-high.webp")
     {
         return Err("cover output names do not match the recording group contract".to_owned());
     }
@@ -411,10 +454,10 @@ fn ffmpeg_arguments(job: &PreviewJob) -> Vec<OsString> {
     arguments
 }
 
-fn cover_ffmpeg_arguments(job: &CoverJob) -> Vec<OsString> {
+fn cover_ffmpeg_arguments(job: &CoverJob, output: &CoverOutput) -> Vec<OsString> {
     let scale = format!(
         "scale=w='min({},iw)':h='min({},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
-        job.maximum_width, job.maximum_height
+        output.maximum_width, output.maximum_height
     );
     vec![
         "-y".into(),
@@ -432,12 +475,12 @@ fn cover_ffmpeg_arguments(job: &CoverJob) -> Vec<OsString> {
         "-vf".into(),
         scale.into(),
         "-c:v".into(),
-        "mjpeg".into(),
+        "libwebp".into(),
         "-q:v".into(),
-        "3".into(),
+        "75".into(),
         "-f".into(),
-        "image2".into(),
-        job.temporary_path.as_os_str().to_owned(),
+        "webp".into(),
+        output.temporary_path.as_os_str().to_owned(),
     ]
 }
 
@@ -595,25 +638,36 @@ mod tests {
     }
 
     #[test]
-    fn cover_arguments_seek_once_and_emit_a_bounded_jpeg() {
+    fn cover_arguments_seek_once_and_emit_bounded_webp() {
         let job = CoverJob {
             input_path: "preview.mp4".into(),
-            temporary_path: "cover.jpg.part".into(),
-            output_path: "cover.jpg".into(),
-            maximum_width: 480,
-            maximum_height: 270,
+            preview: CoverOutput {
+                temporary_path: "cover-preview.webp.part".into(),
+                output_path: "cover-preview.webp".into(),
+                maximum_width: 320,
+                maximum_height: 180,
+            },
+            high_resolution: CoverOutput {
+                temporary_path: "cover-high.webp.part".into(),
+                output_path: "cover-high.webp".into(),
+                maximum_width: 1920,
+                maximum_height: 1080,
+            },
             position_ms: 1_250,
         };
-        let arguments = cover_ffmpeg_arguments(&job)
+        let arguments = cover_ffmpeg_arguments(&job, &job.preview)
             .into_iter()
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         assert!(arguments.windows(2).any(|pair| pair == ["-ss", "1.250"]));
-        assert!(arguments.windows(2).any(|pair| pair == ["-c:v", "mjpeg"]));
+        assert!(arguments.windows(2).any(|pair| pair == ["-c:v", "libwebp"]));
         assert!(arguments
             .iter()
             .any(|argument| argument.contains("force_divisible_by=2")));
-        assert_eq!(arguments.last().map(String::as_str), Some("cover.jpg.part"));
+        assert_eq!(
+            arguments.last().map(String::as_str),
+            Some("cover-preview.webp.part")
+        );
     }
 
     #[test]

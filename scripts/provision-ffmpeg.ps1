@@ -126,7 +126,7 @@ try {
         throw "FFmpeg runtime unexpectedly enables GPL or nonfree components."
     }
     $encoderOutput = (& $sourceExecutable -hide_banner -encoders 2>&1 | Out-String)
-    foreach ($encoder in @("h264_mf", "aac_mf", "libvpx-vp9", "libopus", "mjpeg")) {
+    foreach ($encoder in @("h264_mf", "aac_mf", "libvpx-vp9", "libopus", "libwebp")) {
         if ($encoderOutput -notmatch "\b$encoder\b") {
             throw "FFmpeg runtime does not provide required encoder '$encoder'."
         }

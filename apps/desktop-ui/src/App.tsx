@@ -27,7 +27,7 @@ function StatusDot({ available }: { available: boolean }) {
 }
 
 type ResolutionChoice = "native" | "1080p" | "720p" | "custom";
-type PreviewResolutionChoice = "1080p" | "720p" | "480p" | "custom";
+type PreviewResolutionChoice = "480p" | "360p" | "240p" | "custom";
 
 function resolutionChoice(resolution: OutputResolution): ResolutionChoice {
   if (resolution.mode === "native") return "native";
@@ -49,17 +49,17 @@ function outputResolution(
 
 function previewResolutionChoice(resolution: OutputResolution): PreviewResolutionChoice {
   if (resolution.mode === "fitWithin") {
-    if (resolution.width === 1920 && resolution.height === 1080) return "1080p";
-    if (resolution.width === 1280 && resolution.height === 720) return "720p";
     if (resolution.width === 854 && resolution.height === 480) return "480p";
+    if (resolution.width === 640 && resolution.height === 360) return "360p";
+    if (resolution.width === 426 && resolution.height === 240) return "240p";
   }
   return "custom";
 }
 
 function previewResolution(choice: PreviewResolutionChoice, customWidth: number, customHeight: number): OutputResolution {
-  if (choice === "1080p") return { mode: "fitWithin", width: 1920, height: 1080 };
-  if (choice === "720p") return { mode: "fitWithin", width: 1280, height: 720 };
   if (choice === "480p") return { mode: "fitWithin", width: 854, height: 480 };
+  if (choice === "360p") return { mode: "fitWithin", width: 640, height: 360 };
+  if (choice === "240p") return { mode: "fitWithin", width: 426, height: 240 };
   return { mode: "fitWithin", width: customWidth, height: customHeight };
 }
 
@@ -638,7 +638,7 @@ export function App() {
           <section className="delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-title" aria-describedby="delete-description">
             <span className="delete-dialog-icon"><Trash2 size={22} /></span>
             <h2 id="delete-title">移入 Windows 回收站？</h2>
-            <p id="delete-description">{deleteConfirmation.ids.length === 1 ? deleteConfirmation.names[0] : `${deleteConfirmation.ids.length} 条录制`}及其母版、预览和封面会一起移入回收站，之后仍可恢复。</p>
+            <p id="delete-description">{deleteConfirmation.ids.length === 1 ? deleteConfirmation.names[0] : `${deleteConfirmation.ids.length} 条录制`}及其母版、预览和两张封面会一起移入回收站，之后仍可恢复。</p>
             <footer>
               <button type="button" disabled={deletingRecordings} onClick={() => setDeleteConfirmation(null)}>取消</button>
               <button className="delete-confirm" type="button" disabled={deletingRecordings} onClick={() => void confirmRecordingDeletion()}>{deletingRecordings ? "正在移动…" : "移入回收站"}</button>
@@ -754,8 +754,8 @@ export function App() {
               <div className="resolution-options" role="radiogroup" aria-label="轻量预览分辨率">
                 {([
                   ["480p", "480p", "最高 854×480"],
-                  ["720p", "720p", "最高 1280×720"],
-                  ["1080p", "1080p", "最高 1920×1080"],
+                  ["360p", "360p", "最高 640×360"],
+                  ["240p", "240p", "最高 426×240"],
                   ["custom", "自定义", "保持母版比例"],
                 ] as const).map(([value, label, description]) => (
                   <button

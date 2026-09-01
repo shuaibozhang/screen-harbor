@@ -14,7 +14,7 @@ use frameflow_core::Resolution;
 use frameflow_media::PreviewFormat;
 
 const SCHEMA_VERSION: u32 = 2;
-const MANIFEST_SCHEMA_VERSION: u32 = 2;
+const MANIFEST_SCHEMA_VERSION: u32 = 3;
 const MANIFEST_FILE_NAME: &str = "recording.json";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -42,6 +42,7 @@ pub(crate) struct RecordingDetails {
     pub(crate) main: ArtifactDetails,
     pub(crate) preview: ArtifactDetails,
     pub(crate) cover: ArtifactDetails,
+    pub(crate) high_resolution_cover: ArtifactDetails,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -135,6 +136,20 @@ struct ManifestOutputs {
     main: OutputArtifact,
     preview: OutputArtifact,
     cover: OutputArtifact,
+    #[serde(default = "unrequested_artifact")]
+    high_resolution_cover: OutputArtifact,
+}
+
+fn unrequested_artifact() -> OutputArtifact {
+    OutputArtifact {
+        status: OutputStatus::NotRequested,
+        path: None,
+        file_size_bytes: None,
+        error: None,
+        width: None,
+        height: None,
+        frames_per_second: None,
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -168,8 +183,10 @@ pub(crate) struct PreviewJobSpec {
 pub(crate) struct CoverJobSpec {
     pub(crate) id: String,
     pub(crate) input_path: PathBuf,
-    pub(crate) temporary_path: PathBuf,
-    pub(crate) output_path: PathBuf,
+    pub(crate) preview_temporary_path: PathBuf,
+    pub(crate) preview_output_path: PathBuf,
+    pub(crate) high_temporary_path: PathBuf,
+    pub(crate) high_output_path: PathBuf,
     pub(crate) position_ms: u64,
     pub(crate) source_resolution: Option<Resolution>,
 }
@@ -244,7 +261,16 @@ impl RecordingManifest {
                 },
                 cover: OutputArtifact {
                     status: OutputStatus::Pending,
-                    path: Some("cover.jpg".to_owned()),
+                    path: Some("cover-preview.webp".to_owned()),
+                    file_size_bytes: None,
+                    error: None,
+                    width: None,
+                    height: None,
+                    frames_per_second: None,
+                },
+                high_resolution_cover: OutputArtifact {
+                    status: OutputStatus::Pending,
+                    path: Some("cover-high.webp".to_owned()),
                     file_size_bytes: None,
                     error: None,
                     width: None,
@@ -667,35 +693,39 @@ impl RecordingIndex {
             .ok_or_else(|| "recording has no group directory".to_owned())?
             .join(MANIFEST_FILE_NAME);
         let mut manifest = read_manifest(&manifest_path)?;
-        if manifest.outputs.cover.status == OutputStatus::Completed {
-            return Err("cover is already completed".to_owned());
+        if manifest.outputs.cover.status == OutputStatus::Completed
+            && matches!(
+                manifest.outputs.high_resolution_cover.status,
+                OutputStatus::Completed | OutputStatus::NotRequested
+            )
+        {
+            return Err("covers are already completed".to_owned());
         }
+        manifest.outputs.cover.path = Some("cover-preview.webp".to_owned());
+        manifest.outputs.high_resolution_cover.path = Some("cover-high.webp".to_owned());
         let group_directory = manifest_path
             .parent()
             .ok_or_else(|| "recording manifest has no group directory".to_owned())?;
-        let cover_name = manifest
-            .outputs
-            .cover
-            .path
-            .as_deref()
-            .unwrap_or("cover.jpg");
-        let output_path = safe_artifact_path(group_directory, cover_name)?;
-        let (input_path, source_resolution) =
-            if manifest.outputs.preview.status == OutputStatus::Completed {
-                let preview_name = manifest
-                    .outputs
-                    .preview
-                    .path
-                    .as_deref()
-                    .ok_or_else(|| "completed preview has no path".to_owned())?;
-                (
-                    safe_artifact_path(group_directory, preview_name)?,
-                    artifact_resolution(&manifest.outputs.preview),
-                )
-            } else {
-                (main_path, artifact_resolution(&manifest.outputs.main))
-            };
-        let input_path = input_path
+        let preview_output_path = safe_artifact_path(
+            group_directory,
+            manifest
+                .outputs
+                .cover
+                .path
+                .as_deref()
+                .unwrap_or("cover-preview.webp"),
+        )?;
+        let high_output_path = safe_artifact_path(
+            group_directory,
+            manifest
+                .outputs
+                .high_resolution_cover
+                .path
+                .as_deref()
+                .unwrap_or("cover-high.webp"),
+        )?;
+        let source_resolution = artifact_resolution(&manifest.outputs.main);
+        let input_path = main_path
             .canonicalize()
             .map_err(|error| format!("cover source is unavailable: {error}"))?;
         if self.containing_directory(&input_path).is_err() {
@@ -704,12 +734,17 @@ impl RecordingIndex {
         manifest.outputs.cover.status = OutputStatus::Processing;
         manifest.outputs.cover.error = None;
         manifest.outputs.cover.file_size_bytes = None;
+        manifest.outputs.high_resolution_cover.status = OutputStatus::Processing;
+        manifest.outputs.high_resolution_cover.error = None;
+        manifest.outputs.high_resolution_cover.file_size_bytes = None;
         write_manifest_atomically(&manifest_path, &manifest)?;
         Ok(CoverJobSpec {
             id: manifest.id,
             input_path,
-            temporary_path: output_path.with_extension("jpg.part"),
-            output_path,
+            preview_temporary_path: preview_output_path.with_extension("webp.part"),
+            preview_output_path,
+            high_temporary_path: high_output_path.with_extension("webp.part"),
+            high_output_path,
             position_ms: (manifest.duration_ms / 10).min(1_000),
             source_resolution,
         })
@@ -732,10 +767,13 @@ impl RecordingIndex {
             for row in rows {
                 let (id, manifest_path) = row.map_err(|error| error.to_string())?;
                 let manifest = read_manifest(Path::new(&manifest_path))?;
-                if matches!(
+                if (matches!(
                     manifest.outputs.cover.status,
                     OutputStatus::Pending | OutputStatus::Processing
-                ) && !matches!(
+                ) || matches!(
+                    manifest.outputs.high_resolution_cover.status,
+                    OutputStatus::Pending | OutputStatus::Processing
+                )) && !matches!(
                     manifest.outputs.preview.status,
                     OutputStatus::Pending | OutputStatus::Processing
                 ) {
@@ -752,7 +790,7 @@ impl RecordingIndex {
         result: Result<(), String>,
     ) -> Result<(), String> {
         let manifest_path = job
-            .output_path
+            .preview_output_path
             .parent()
             .ok_or_else(|| "recording has no group directory".to_owned())?
             .join(MANIFEST_FILE_NAME);
@@ -760,20 +798,38 @@ impl RecordingIndex {
         let (status, error) = match result {
             Ok(()) => {
                 manifest.outputs.cover.file_size_bytes = Some(
-                    fs::metadata(&job.output_path)
-                        .map_err(|error| format!("completed cover is unavailable: {error}"))?
+                    fs::metadata(&job.preview_output_path)
+                        .map_err(|error| {
+                            format!("completed preview cover is unavailable: {error}")
+                        })?
+                        .len(),
+                );
+                manifest.outputs.high_resolution_cover.file_size_bytes = Some(
+                    fs::metadata(&job.high_output_path)
+                        .map_err(|error| {
+                            format!("completed high-resolution cover is unavailable: {error}")
+                        })?
                         .len(),
                 );
                 if let Some(source) = job.source_resolution {
                     let cover = preview_resolution(
                         source,
                         Resolution {
-                            width: 480,
-                            height: 270,
+                            width: 320,
+                            height: 180,
                         },
                     );
                     manifest.outputs.cover.width = Some(cover.width);
                     manifest.outputs.cover.height = Some(cover.height);
+                    let high = preview_resolution(
+                        source,
+                        Resolution {
+                            width: 1920,
+                            height: 1080,
+                        },
+                    );
+                    manifest.outputs.high_resolution_cover.width = Some(high.width);
+                    manifest.outputs.high_resolution_cover.height = Some(high.height);
                 }
                 (OutputStatus::Completed, None)
             }
@@ -781,12 +837,18 @@ impl RecordingIndex {
                 manifest.outputs.cover.file_size_bytes = None;
                 manifest.outputs.cover.width = None;
                 manifest.outputs.cover.height = None;
+                manifest.outputs.high_resolution_cover.file_size_bytes = None;
+                manifest.outputs.high_resolution_cover.width = None;
+                manifest.outputs.high_resolution_cover.height = None;
                 (OutputStatus::Failed, Some(error))
             }
         };
         manifest.outputs.cover.frames_per_second = None;
         manifest.outputs.cover.status = status;
         manifest.outputs.cover.error = error;
+        manifest.outputs.high_resolution_cover.frames_per_second = None;
+        manifest.outputs.high_resolution_cover.status = status;
+        manifest.outputs.high_resolution_cover.error = manifest.outputs.cover.error.clone();
         write_manifest_atomically(&manifest_path, &manifest)
     }
 
@@ -912,6 +974,10 @@ impl RecordingIndex {
                 main: artifact_details(group_directory, &manifest.outputs.main)?,
                 preview: artifact_details(group_directory, &manifest.outputs.preview)?,
                 cover: artifact_details(group_directory, &manifest.outputs.cover)?,
+                high_resolution_cover: artifact_details(
+                    group_directory,
+                    &manifest.outputs.high_resolution_cover,
+                )?,
             });
         }
         Ok(RecordingDetails {
@@ -938,6 +1004,15 @@ impl RecordingIndex {
                 error: None,
             },
             cover: ArtifactDetails {
+                status: OutputStatus::NotRequested,
+                path: None,
+                file_size_bytes: None,
+                width: None,
+                height: None,
+                frames_per_second: None,
+                error: None,
+            },
+            high_resolution_cover: ArtifactDetails {
                 status: OutputStatus::NotRequested,
                 path: None,
                 file_size_bytes: None,
@@ -1770,7 +1845,7 @@ mod tests {
     }
 
     #[test]
-    fn cover_is_generated_from_preview_and_exposed_to_the_library() {
+    fn webp_covers_are_generated_from_the_master_and_exposed_to_the_library() {
         let workspace = TestWorkspace::new("cover-status");
         let path = workspace.group_recording("1700000000012");
         let index = workspace.index();
@@ -1780,32 +1855,37 @@ mod tests {
         fs::write(&preview.output_path, b"preview").unwrap();
         index.finish_preview(&preview, Ok(())).unwrap();
         let cover = index.prepare_cover_for_id("1700000000012").unwrap();
-        assert_eq!(
-            cover.input_path,
-            preview.output_path.canonicalize().unwrap()
-        );
+        assert_eq!(cover.input_path, path.canonicalize().unwrap());
         assert_eq!(cover.position_ms, 1_000);
         assert_eq!(
             cover.source_resolution,
             Some(Resolution {
-                width: 854,
-                height: 480
+                width: 1920,
+                height: 1080
             })
         );
-        fs::write(&cover.output_path, b"jpeg").unwrap();
+        fs::write(&cover.preview_output_path, b"webp").unwrap();
+        fs::write(&cover.high_output_path, b"high-webp").unwrap();
         index.finish_cover(&cover, Ok(())).unwrap();
 
         let recent = index.recent(1).unwrap();
         assert_eq!(recent[0].cover_status, OutputStatus::Completed);
         assert_eq!(
             recent[0].cover_path,
-            Some(cover.output_path.to_string_lossy().into_owned())
+            Some(cover.preview_output_path.to_string_lossy().into_owned())
         );
         let details = index.details("1700000000012").unwrap();
         assert_eq!(details.cover.status, OutputStatus::Completed);
-        assert_eq!(details.cover.width, Some(480));
-        assert_eq!(details.cover.height, Some(270));
+        assert_eq!(details.cover.width, Some(320));
+        assert_eq!(details.cover.height, Some(180));
         assert_eq!(details.cover.file_size_bytes, Some(4));
+        assert_eq!(
+            details.high_resolution_cover.status,
+            OutputStatus::Completed
+        );
+        assert_eq!(details.high_resolution_cover.width, Some(1920));
+        assert_eq!(details.high_resolution_cover.height, Some(1080));
+        assert_eq!(details.high_resolution_cover.file_size_bytes, Some(9));
         assert!(index.recoverable_cover_ids().unwrap().is_empty());
     }
 
@@ -1823,7 +1903,7 @@ mod tests {
         let cover = index.prepare_cover_for_id("1700000000013").unwrap();
         assert_eq!(cover.input_path, path.canonicalize().unwrap());
         index
-            .finish_cover(&cover, Err("jpeg failed".to_owned()))
+            .finish_cover(&cover, Err("webp failed".to_owned()))
             .unwrap();
         assert!(path.is_file());
         let retry = index.prepare_cover_for_id("1700000000013").unwrap();
