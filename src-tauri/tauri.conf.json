@@ -51,7 +51,11 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$VIDEO/FrameFlow/**"]
+      }
     }
   },
   "bundle": {
@@ -60,6 +64,9 @@
       "nsis"
     ],
     "shortDescription": "FrameFlow Windows screen recorder",
-    "longDescription": "A lightweight Windows screen recorder focused on clear capture controls and reliable local output."
+    "longDescription": "A lightweight Windows screen recorder focused on clear capture controls and reliable local output.",
+    "resources": {
+      "resources/ffmpeg/": "ffmpeg/"
+    }
   }
 }

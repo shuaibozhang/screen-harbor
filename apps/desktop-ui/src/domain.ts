@@ -19,11 +19,42 @@ export interface RecentRecording {
   createdLabel: string;
   mainStatus: OutputStatus;
   previewStatus: OutputStatus;
+  coverStatus: OutputStatus;
+  coverPath?: string;
+}
+
+export interface InterruptedRecording {
+  id: string;
+  name: string;
+  createdLabel: string;
+  fileSizeBytes: number;
+}
+
+export interface RecordingArtifact {
+  status: OutputStatus;
+  path?: string;
+  fileSizeBytes?: number;
+  width?: number;
+  height?: number;
+  framesPerSecond?: number;
+  error?: string;
+}
+
+export interface RecordingDetails {
+  id: string;
+  name: string;
+  createdLabel: string;
+  durationSeconds?: number;
+  main: RecordingArtifact;
+  preview: RecordingArtifact;
+  cover: RecordingArtifact;
 }
 
 export interface AppSnapshot {
   recordingState: RecordingState;
   saveDirectory: string;
+  saveDirectoryAvailableBytes?: number;
+  globalShortcutAvailable: boolean;
   microphone: { enabled: boolean; deviceName?: string; available: boolean };
   systemAudio: { enabled: boolean; deviceName?: string; available: boolean };
   outputSummary: string;
@@ -32,7 +63,24 @@ export interface AppSnapshot {
   supportedCaptureFps: number[];
   monitorRefreshRateHz?: number;
   recommendedCaptureFps: number;
+  captureDisplays: CaptureDisplay[];
+  selectedCaptureDisplayId: string;
   recentRecordings: RecentRecording[];
+  interruptedRecordings: InterruptedRecording[];
+}
+
+export interface CaptureDisplay {
+  id: string;
+  label: string;
+  width: number;
+  height: number;
+  scalePercent: number;
+  primary: boolean;
+  refreshRateHz?: number;
+}
+
+export interface DisplayChangeEvent {
+  selectionCancelled: boolean;
 }
 
 export type OutputResolution =
@@ -75,8 +123,16 @@ export interface AudioWarningEvent {
   message: string;
 }
 
+export interface StorageWarningEvent {
+  health: "healthy" | "low" | "critical" | "unavailable";
+  availableBytes?: number;
+  message?: string;
+  autoStopping: boolean;
+}
+
 export interface FinalizationEvent {
   success: boolean;
+  recordingId?: string;
   outputPath?: string;
   error?: string;
 }

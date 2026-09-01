@@ -8,8 +8,9 @@
   "scripts": {
     "dev": "npm run dev --workspace @frameflow/desktop-ui",
     "desktop:dev": "tauri dev",
-    "desktop:build": "tauri build --no-bundle",
-    "package:windows": "tauri build --bundles nsis",
+    "provision:ffmpeg": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/provision-ffmpeg.ps1",
+    "desktop:build": "npm run provision:ffmpeg && tauri build --no-bundle",
+    "package:windows": "npm run provision:ffmpeg && tauri build --bundles nsis",
     "build": "npm run build --workspace @frameflow/desktop-ui",
     "test": "npm run test:ui && npm run test:recording-validator",
     "test:ui": "npm run test --workspace @frameflow/desktop-ui",

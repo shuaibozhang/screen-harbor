@@ -4,6 +4,8 @@ import type { AppSnapshot, OutputResolution } from "./domain";
 const developmentSnapshot: AppSnapshot = {
   recordingState: "idle",
   saveDirectory: "D:\\FrameFlow\\Recordings",
+  saveDirectoryAvailableBytes: 128 * 1024 * 1024 * 1024,
+  globalShortcutAvailable: true,
   microphone: { enabled: true, deviceName: "默认麦克风", available: true },
   systemAudio: { enabled: false, deviceName: "扬声器（默认设备）", available: true },
   outputSummary: "MP4 · 有声音 / WebM · 480p · 有声音 / 封面",
@@ -12,7 +14,13 @@ const developmentSnapshot: AppSnapshot = {
   supportedCaptureFps: [24, 30, 60],
   monitorRefreshRateHz: 60,
   recommendedCaptureFps: 60,
+  captureDisplays: [
+    { id: "\\\\.\\DISPLAY1", label: "屏幕 1（主屏幕）", width: 3840, height: 2160, scalePercent: 175, primary: true, refreshRateHz: 60 },
+    { id: "\\\\.\\DISPLAY2", label: "屏幕 2", width: 1920, height: 1080, scalePercent: 100, primary: false, refreshRateHz: 60 },
+  ],
+  selectedCaptureDisplayId: "\\\\.\\DISPLAY1",
   recentRecordings: [],
+  interruptedRecordings: [],
 };
 
 export const isTauriRuntime = () => "__TAURI_INTERNALS__" in window;
@@ -23,6 +31,14 @@ export async function getAppSnapshot(): Promise<AppSnapshot> {
 
 export async function beginSelection(): Promise<void> {
   if (isTauriRuntime()) await invoke("begin_selection");
+}
+
+export async function chooseSaveDirectory(): Promise<string | null> {
+  return isTauriRuntime() ? invoke<string | null>("choose_save_directory") : null;
+}
+
+export async function setCaptureDisplay(displayId: string): Promise<void> {
+  if (isTauriRuntime()) await invoke("set_capture_display", { displayId });
 }
 
 export async function setOutputSettings(

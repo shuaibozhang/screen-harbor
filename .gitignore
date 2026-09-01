@@ -34,6 +34,9 @@ __pycache__/
 /h264-probe*.mp4
 /frameflow-h264-probe.mp4
 
+# Provisioned release runtimes (recreated by scripts/provision-ffmpeg.ps1)
+src-tauri/resources/ffmpeg/
+
 # IDE and OS metadata
 .idea/
 .vscode/

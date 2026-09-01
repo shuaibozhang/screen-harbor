@@ -107,6 +107,8 @@ pub struct LiveInputSnapshot {
 pub struct FinalizedCapture {
     pub output_path: PathBuf,
     pub duration: Duration,
+    pub output_size: CaptureOutputSize,
+    pub frames_per_second: u32,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -214,6 +216,8 @@ pub struct CaptureWorkerClient {
     stderr_reader: Option<JoinHandle<()>>,
     next_request_id: u64,
     finished: bool,
+    output_size: CaptureOutputSize,
+    frames_per_second: u32,
 }
 
 const WORKER_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -365,6 +369,8 @@ impl CaptureWorkerClient {
             stderr_reader: Some(stderr_reader),
             next_request_id: 1,
             finished: false,
+            output_size,
+            frames_per_second,
         };
         match client.request(CaptureWorkerCommand::Start {
             selection: selection.clone(),
@@ -402,6 +408,8 @@ impl CaptureWorkerClient {
     }
 
     pub fn finalize(mut self) -> Result<FinalizedCapture, String> {
+        let output_size = self.output_size;
+        let frames_per_second = self.frames_per_second;
         let result = self.request(CaptureWorkerCommand::Stop)?;
         self.finished = true;
         self.input.take();
@@ -424,6 +432,8 @@ impl CaptureWorkerClient {
             } => Ok(FinalizedCapture {
                 output_path,
                 duration: Duration::from_millis(duration_ms),
+                output_size,
+                frames_per_second,
             }),
             result => Err(unexpected_worker_result("stop", result)),
         }
@@ -827,6 +837,8 @@ pub struct CaptureEngine {
     paused_total: Duration,
     temporary_path: PathBuf,
     output_path: PathBuf,
+    output_size: CaptureOutputSize,
+    frames_per_second: u32,
 }
 
 struct ActiveAudioCapture {
@@ -878,6 +890,20 @@ enum AudioWorkerMessage {
     Stop {
         final_frame: u64,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AudioCallbackKind {
+    Packet,
+    Failure,
+}
+
+fn should_handle_audio_callback(
+    kind: AudioCallbackKind,
+    callback_stopped: bool,
+    paused: bool,
+) -> bool {
+    !callback_stopped && (kind == AudioCallbackKind::Failure || !paused)
 }
 
 #[derive(Default)]
@@ -962,6 +988,8 @@ impl CaptureEngine {
             paused_total: Duration::ZERO,
             temporary_path: temporary_path.as_ref().to_path_buf(),
             output_path: output_path.as_ref().to_path_buf(),
+            output_size,
+            frames_per_second,
         })
     }
 
@@ -1076,6 +1104,8 @@ impl CaptureEngine {
             paused_total,
             temporary_path,
             output_path,
+            output_size,
+            frames_per_second,
             ..
         } = self;
         let clock_end = paused_at.unwrap_or_else(Instant::now);
@@ -1091,6 +1121,8 @@ impl CaptureEngine {
         Ok(FinalizedCapture {
             output_path,
             duration,
+            output_size,
+            frames_per_second,
         })
     }
 }
@@ -1215,7 +1247,16 @@ fn start_audio_source(
 ) -> Result<ActiveAudioSource, frameflow_windows::PlatformError> {
     let mut callback_stopped = false;
     let session = frameflow_windows::start_wasapi_capture(capture_source, move |result| {
-        if callback_stopped || context.paused.load(Ordering::Acquire) {
+        let kind = if result.is_ok() {
+            AudioCallbackKind::Packet
+        } else {
+            AudioCallbackKind::Failure
+        };
+        if !should_handle_audio_callback(
+            kind,
+            callback_stopped,
+            context.paused.load(Ordering::Acquire),
+        ) {
             return;
         }
         match result {
@@ -1693,6 +1734,25 @@ mod tests {
         assert_eq!(json["result"], "event");
         assert_eq!(json["event"]["kind"], "audioWarning");
         assert_eq!(json["event"]["source"], "systemAudio");
+    }
+
+    #[test]
+    fn paused_audio_ignores_packets_but_still_handles_device_failure() {
+        assert!(!should_handle_audio_callback(
+            AudioCallbackKind::Packet,
+            false,
+            true
+        ));
+        assert!(should_handle_audio_callback(
+            AudioCallbackKind::Failure,
+            false,
+            true
+        ));
+        assert!(!should_handle_audio_callback(
+            AudioCallbackKind::Failure,
+            true,
+            false
+        ));
     }
 
     #[test]

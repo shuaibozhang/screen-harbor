@@ -217,7 +217,14 @@ where
     }
     let _ = startup.send(Ok(format));
 
-    let result = capture_packets(&capture_client, format, &event, &control, &mut callback);
+    let result = capture_packets(
+        &audio_client,
+        &capture_client,
+        format,
+        &event,
+        &control,
+        &mut callback,
+    );
     if let Err(error) = &result {
         callback(Err(copy_audio_error(error)));
     }
@@ -268,6 +275,7 @@ fn setup_capture(
 }
 
 fn capture_packets<F>(
+    audio_client: &IAudioClient,
     capture_client: &IAudioCaptureClient,
     format: AudioStreamFormat,
     event: &OwnedEvent,
@@ -283,7 +291,13 @@ where
         }
         match unsafe { WaitForSingleObject(event.handle(), 100) } {
             WAIT_OBJECT_0 => drain_packets(capture_client, format, callback)?,
-            WAIT_TIMEOUT => {}
+            WAIT_TIMEOUT => {
+                // A removed or disabled endpoint does not always signal the sample
+                // event. Querying the shared-mode client provides a bounded health
+                // check so a silent device still degrades within one wait cycle.
+                unsafe { audio_client.GetCurrentPadding() }
+                    .map_err(|error| audio_error("check audio endpoint health", error))?;
+            }
             result => {
                 return Err(PlatformError::AudioCapture(format!(
                     "wait for audio samples returned {}",

@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Mic, MicOff, Pause, Play, Square, Volume2, VolumeX } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { AudioWarningEvent, CaptureStats, LiveAudioInput, RecordingState } from "./domain";
+import type { AudioWarningEvent, CaptureStats, LiveAudioInput, RecordingState, StorageWarningEvent } from "./domain";
 import "./recording-controls.css";
 
 function formatElapsed(milliseconds: number) {
@@ -17,6 +17,7 @@ export function RecordingControls() {
   const [stats, setStats] = useState<CaptureStats | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [audioWarning, setAudioWarning] = useState<string | null>(null);
+  const [storageWarning, setStorageWarning] = useState<StorageWarningEvent | null>(null);
   const stopping = phase === "finalizing";
 
   useEffect(() => {
@@ -25,6 +26,7 @@ export function RecordingControls() {
     let unlisten: (() => void) | undefined;
     let unlistenAudio: (() => void) | undefined;
     let unlistenExitBlocked: (() => void) | undefined;
+    let unlistenStorage: (() => void) | undefined;
     void Promise.all([
       listen<RecordingState>("recording://state-changed", (event) => {
         setPhase(event.payload);
@@ -32,6 +34,7 @@ export function RecordingControls() {
           setStats(null);
           setError(null);
           setAudioWarning(null);
+          setStorageWarning(null);
         }
       }),
       listen<AudioWarningEvent>("recording://audio-warning", (event) => {
@@ -40,16 +43,21 @@ export function RecordingControls() {
       listen<string>("recording://exit-blocked", (event) => {
         setError(event.payload);
       }),
-    ]).then(async ([disposeState, disposeAudio, disposeExitBlocked]) => {
+      listen<StorageWarningEvent>("recording://storage-warning", (event) => {
+        setStorageWarning(event.payload.health === "healthy" ? null : event.payload);
+      }),
+    ]).then(async ([disposeState, disposeAudio, disposeExitBlocked, disposeStorage]) => {
       if (disposed) {
         disposeState();
         disposeAudio();
         disposeExitBlocked();
+        disposeStorage();
         return;
       }
       unlisten = disposeState;
       unlistenAudio = disposeAudio;
       unlistenExitBlocked = disposeExitBlocked;
+      unlistenStorage = disposeStorage;
       try {
         const current = await invoke<RecordingState>("get_recording_state");
         if (!disposed) setPhase(current);
@@ -62,6 +70,7 @@ export function RecordingControls() {
       unlisten?.();
       unlistenAudio?.();
       unlistenExitBlocked?.();
+      unlistenStorage?.();
     };
   }, []);
 
@@ -167,7 +176,11 @@ export function RecordingControls() {
           <Square size={14} />{stopping ? "保存中…" : "停止并保存"}
         </button>
       </div>
-      {(error || stats?.lastError || audioWarning || stats?.audio?.warning) && <div className={`recording-controls-error ${!error && !stats?.lastError ? "warning" : ""}`}>{error ?? stats?.lastError ?? audioWarning ?? stats?.audio?.warning}</div>}
+      {(error || stats?.lastError || storageWarning || audioWarning || stats?.audio?.warning) && (
+        <div className={`recording-controls-error ${!error && !stats?.lastError && storageWarning?.health !== "critical" && storageWarning?.health !== "unavailable" ? "warning" : ""}`}>
+          {error ?? stats?.lastError ?? storageWarning?.message ?? audioWarning ?? stats?.audio?.warning}
+        </div>
+      )}
     </main>
   );
 }

@@ -72,10 +72,6 @@ pub fn list_displays() -> Result<Vec<DisplayInfo>, PlatformError> {
 }
 
 pub(crate) fn monitor_for_display_id(display_id: &str) -> Result<HMONITOR, PlatformError> {
-    let index = display_id
-        .strip_prefix("display-")
-        .and_then(|value| value.parse::<usize>().ok())
-        .ok_or_else(|| PlatformError::DisplayNotFound(display_id.to_owned()))?;
     let mut monitors = Vec::new();
     let succeeded = unsafe {
         EnumDisplayMonitors(
@@ -88,10 +84,13 @@ pub(crate) fn monitor_for_display_id(display_id: &str) -> Result<HMONITOR, Platf
     if !succeeded.as_bool() {
         return Err(WindowsError::from_win32().into());
     }
-    monitors
-        .get(index)
-        .copied()
-        .ok_or_else(|| PlatformError::DisplayNotFound(display_id.to_owned()))
+    for monitor in monitors {
+        let info = monitor_info(monitor)?;
+        if display_device_id(&info) == display_id {
+            return Ok(monitor);
+        }
+    }
+    Err(PlatformError::DisplayNotFound(display_id.to_owned()))
 }
 
 unsafe extern "system" fn collect_monitor_handle(
@@ -112,18 +111,13 @@ unsafe extern "system" fn collect_monitor(
     context: LPARAM,
 ) -> BOOL {
     let collector = unsafe { &mut *(context.0 as *mut MonitorCollector) };
-    let mut info = MONITORINFOEXW {
-        monitorInfo: windows::Win32::Graphics::Gdi::MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFOEXW>() as u32,
-            ..Default::default()
-        },
-        ..Default::default()
+    let info = match monitor_info(monitor) {
+        Ok(info) => info,
+        Err(error) => {
+            collector.error = Some(error);
+            return false.into();
+        }
     };
-
-    if !unsafe { GetMonitorInfoW(monitor, &mut info.monitorInfo) }.as_bool() {
-        collector.error = Some(WindowsError::from_win32());
-        return false.into();
-    }
 
     let bounds = info.monitorInfo.rcMonitor;
     let mut dpi_x = 0;
@@ -134,9 +128,8 @@ unsafe extern "system" fn collect_monitor(
         collector.error = Some(error);
         return false.into();
     }
-    let index = collector.displays.len();
     collector.displays.push(DisplayInfo {
-        id: format!("display-{index}"),
+        id: display_device_id(&info),
         bounds: PhysicalRect {
             x: bounds.left,
             y: bounds.top,
@@ -150,6 +143,31 @@ unsafe extern "system" fn collect_monitor(
     });
 
     true.into()
+}
+
+fn monitor_info(monitor: HMONITOR) -> Result<MONITORINFOEXW, windows::core::Error> {
+    let mut info = MONITORINFOEXW {
+        monitorInfo: windows::Win32::Graphics::Gdi::MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFOEXW>() as u32,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    if unsafe { GetMonitorInfoW(monitor, &mut info.monitorInfo) }.as_bool() {
+        Ok(info)
+    } else {
+        Err(WindowsError::from_win32())
+    }
+}
+
+fn display_device_id(info: &MONITORINFOEXW) -> String {
+    let end = info
+        .szDevice
+        .iter()
+        .position(|character| *character == 0)
+        .unwrap_or(info.szDevice.len());
+    String::from_utf16_lossy(&info.szDevice[..end])
 }
 
 fn nominal_refresh_rate(info: &MONITORINFOEXW) -> Option<u32> {

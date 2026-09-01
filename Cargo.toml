@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/frameflow-capture",
     "crates/frameflow-core",
+    "crates/frameflow-media",
     "crates/frameflow-recorder",
     "crates/frameflow-windows",
     "src-tauri",

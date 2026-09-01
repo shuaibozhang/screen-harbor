@@ -4,6 +4,14 @@ fn main() {
     let arguments = std::env::args_os().collect::<Vec<_>>();
     if arguments
         .iter()
+        .any(|argument| argument == "--media-worker")
+    {
+        if let Err(error) = frameflow_media::run_media_worker_stdio() {
+            eprintln!("media worker failed: {error}");
+            std::process::exit(1);
+        }
+    } else if arguments
+        .iter()
         .any(|argument| argument == "--capture-worker")
     {
         let command_pipe_name = arguments
