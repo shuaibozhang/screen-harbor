@@ -10,6 +10,7 @@ export function SelectionControls() {
   const [phase, setPhase] = useState<RecordingState>("idle");
   const [countdown, setCountdown] = useState(3);
   const [error, setError] = useState<string | null>(null);
+  const [drawing, setDrawing] = useState(false);
 
   useEffect(() => {
     document.documentElement.dataset.window = "selection-controls";
@@ -18,17 +19,30 @@ export function SelectionControls() {
       .catch(() => undefined);
     let disposed = false;
     let unlistenSelection: (() => void) | undefined;
+    let unlistenSelectionStarted: (() => void) | undefined;
     let unlistenState: (() => void) | undefined;
     void listen<RegionSelection>("selection://confirmed", (event) => {
       setSelection(event.payload);
+      setDrawing(false);
       setError(null);
     }).then((dispose) => {
       if (disposed) dispose();
       else unlistenSelection = dispose;
     });
+    void listen("selection://started", () => {
+      setSelection(null);
+      setDrawing(true);
+      setError(null);
+    }).then((dispose) => {
+      if (disposed) dispose();
+      else unlistenSelectionStarted = dispose;
+    });
     void listen<RecordingState>("recording://state-changed", (event) => {
       setPhase(event.payload);
-      if (event.payload === "idle") setSelection(null);
+      if (event.payload === "idle") {
+        setSelection(null);
+        setDrawing(false);
+      }
     }).then((dispose) => {
       if (disposed) dispose();
       else unlistenState = dispose;
@@ -36,6 +50,7 @@ export function SelectionControls() {
     return () => {
       disposed = true;
       unlistenSelection?.();
+      unlistenSelectionStarted?.();
       unlistenState?.();
     };
   }, []);
@@ -78,26 +93,37 @@ export function SelectionControls() {
       setError(String(cause));
     }
   };
+  const isDrawing = phase === "selecting" || drawing;
 
   return (
     <main className="selection-controls-shell">
       <div className="selection-controls-bar">
         <strong>
-          {phase === "countdown"
+          {isDrawing
+            ? "智能选择区域"
+            : phase === "countdown"
             ? `${countdown} 秒后开始`
             : selection
               ? `${selection.captureRect.width} × ${selection.captureRect.height}`
               : "等待选区"}
         </strong>
-        <span>{phase === "countdown" ? "Esc 取消" : "拖边框缩放 · 顶部手柄移动"}</span>
-        {phase !== "countdown" && (
+        <span>
+          {isDrawing
+            ? "单击选窗口 · 拖动自由框选 · Esc 取消"
+            : phase === "countdown"
+              ? "Esc 取消"
+              : "拖边框缩放 · 顶部手柄移动"}
+        </span>
+        {phase !== "countdown" && !isDrawing && (
           <button onClick={() => void invoke("redraw_selection")}>
             <RotateCcw size={15} />重新框选
           </button>
         )}
-        <button className="primary" disabled={!selection || phase === "countdown"} onClick={() => void start()}>
-          <Play size={15} />开始录制
-        </button>
+        {!isDrawing && (
+          <button className="primary" disabled={!selection || phase === "countdown"} onClick={() => void start()}>
+            <Play size={15} />开始录制
+          </button>
+        )}
         <button className="icon" aria-label="取消" onClick={() => void invoke(phase === "countdown" ? "cancel_countdown" : "cancel_selection")}>
           <X size={16} />
         </button>

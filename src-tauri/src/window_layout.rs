@@ -82,6 +82,36 @@ pub(crate) fn capture_toolbar_layout(
     }
 }
 
+pub(crate) fn selection_hint_layout(monitor: MonitorGeometry, scale_factor: f64) -> ToolbarLayout {
+    const LOGICAL_TOP_MARGIN: f64 = 24.0;
+
+    let scale_factor = if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
+    let (logical_width, logical_height) = CaptureToolbar::Selection.logical_size();
+    let width =
+        ((f64::from(logical_width) * scale_factor).round() as u32).clamp(1, monitor.width.max(1));
+    let height =
+        ((f64::from(logical_height) * scale_factor).round() as u32).clamp(1, monitor.height.max(1));
+    let margin = (LOGICAL_TOP_MARGIN * scale_factor).round() as i64;
+    let monitor_left = i64::from(monitor.x);
+    let monitor_top = i64::from(monitor.y);
+    let centered_x = monitor_left + (i64::from(monitor.width) - i64::from(width)) / 2;
+    let y = (monitor_top + margin).clamp(
+        monitor_top,
+        monitor_top + i64::from(monitor.height) - i64::from(height),
+    );
+
+    ToolbarLayout {
+        x: centered_x as i32,
+        y: y as i32,
+        width,
+        height,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,5 +218,28 @@ mod tests {
             capture_toolbar_layout(CaptureToolbar::Selection, selection, monitor, f64::NAN);
 
         assert_eq!((layout.width, layout.height), (520, 56));
+    }
+
+    #[test]
+    fn selection_hint_is_centered_near_the_top_of_the_target_monitor() {
+        let layout = selection_hint_layout(
+            MonitorGeometry {
+                x: -2560,
+                y: -320,
+                width: 2560,
+                height: 1440,
+            },
+            1.5,
+        );
+
+        assert_eq!(
+            layout,
+            ToolbarLayout {
+                x: -1670,
+                y: -284,
+                width: 780,
+                height: 84,
+            }
+        );
     }
 }

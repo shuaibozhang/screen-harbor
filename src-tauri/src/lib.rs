@@ -45,7 +45,9 @@ use tauri::{
     Emitter, Manager, PhysicalPosition, PhysicalSize, State, WindowEvent,
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
-use window_layout::{capture_toolbar_layout, CaptureToolbar, MonitorGeometry};
+use window_layout::{
+    capture_toolbar_layout, selection_hint_layout, CaptureToolbar, MonitorGeometry,
+};
 
 const TRAY_SHOW_ID: &str = "show";
 const TRAY_QUIT_ID: &str = "quit";
@@ -857,6 +859,10 @@ fn begin_selection_impl(
 
     app.emit("recording://state-changed", next_state)
         .map_err(|error| error.to_string())?;
+    let _ = app.emit("selection://started", ());
+    let _ = position_selection_hint(&overlay, display.bounds);
+    let _ = overlay.show();
+    let _ = overlay.set_focus();
 
     Ok(next_state)
 }
@@ -913,6 +919,12 @@ fn redraw_selection(app: tauri::AppHandle, state: State<'_, AppState>) -> Result
         .native_selection
         .lock()
         .map_err(|_| "native selection state is unavailable".to_owned())? = Some(native);
+    if let Some(toolbar) = app.get_webview_window("selection") {
+        let _ = app.emit("selection://started", ());
+        let _ = position_selection_hint(&toolbar, bounds);
+        let _ = toolbar.show();
+        let _ = toolbar.set_focus();
+    }
     Ok(())
 }
 
@@ -1735,6 +1747,38 @@ fn position_capture_toolbar(
     let layout = capture_toolbar_layout(
         toolbar,
         selection.desktop_rect,
+        MonitorGeometry {
+            x: monitor_position.x,
+            y: monitor_position.y,
+            width: monitor_size.width,
+            height: monitor_size.height,
+        },
+        monitor.scale_factor(),
+    );
+
+    let current_size = controls.outer_size().map_err(|error| error.to_string())?;
+    if current_size.width != layout.width || current_size.height != layout.height {
+        controls
+            .set_size(PhysicalSize::new(layout.width, layout.height))
+            .map_err(|error| error.to_string())?;
+    }
+    controls
+        .set_position(PhysicalPosition::new(layout.x, layout.y))
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn position_selection_hint(
+    controls: &tauri::WebviewWindow,
+    display_bounds: PhysicalRect,
+) -> Result<(), String> {
+    let monitor = controls
+        .monitor_from_point(f64::from(display_bounds.x), f64::from(display_bounds.y))
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "selection display is unavailable".to_owned())?;
+    let monitor_position = *monitor.position();
+    let monitor_size = *monitor.size();
+    let layout = selection_hint_layout(
         MonitorGeometry {
             x: monitor_position.x,
             y: monitor_position.y,

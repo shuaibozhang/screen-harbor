@@ -9,6 +9,7 @@ mod displays;
 mod media_foundation;
 mod selection_overlay;
 mod shell;
+mod smart_selection;
 mod wasapi_loopback;
 mod wgc;
 

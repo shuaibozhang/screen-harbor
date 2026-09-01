@@ -2,7 +2,7 @@ use std::{
     ffi::c_void,
     sync::mpsc,
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use frameflow_capture::PhysicalRect;
@@ -24,18 +24,19 @@ use windows::{
                 SetForegroundWindow, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
                 ShowWindow, TranslateMessage, CREATESTRUCTW, GWLP_USERDATA, GWL_EXSTYLE, HTCLIENT,
                 HTTRANSPARENT, IDC_CROSS, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE,
-                IDC_SIZEWE, LWA_ALPHA, MSG, PM_REMOVE, SWP_NOACTIVATE, SWP_NOZORDER,
-                SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, WM_ERASEBKGND, WM_KEYDOWN,
-                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCHITTEST, WM_PAINT,
-                WM_SETCURSOR, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-                WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+                IDC_SIZEWE, LWA_ALPHA, MSG, PM_REMOVE, SWP_HIDEWINDOW, SWP_NOACTIVATE,
+                SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, WM_ERASEBKGND,
+                WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCHITTEST,
+                WM_PAINT, WM_SETCURSOR, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+                WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
             },
         },
     },
 };
 
 use crate::{
-    displays::enable_current_thread_per_monitor_v2_dpi, exclude_window_from_capture, PlatformError,
+    displays::enable_current_thread_per_monitor_v2_dpi, exclude_window_from_capture,
+    smart_selection::candidate_at_point, PlatformError,
 };
 
 const MIN_SELECTION_SIZE: i32 = 32;
@@ -43,6 +44,9 @@ const BORDER_THICKNESS: i32 = 5;
 const CORNER_HIT_SIZE: i32 = 18;
 const MOVE_HANDLE_WIDTH: i32 = 28;
 const MOVE_HANDLE_HEIGHT: i32 = 16;
+const SELECTION_MASK_ALPHA: u8 = 78;
+const FREE_SELECTION_DRAG_THRESHOLD: i32 = 5;
+const SMART_HOVER_SCAN_INTERVAL: Duration = Duration::from_millis(16);
 
 enum SessionCommand {
     Lock(mpsc::SyncSender<()>),
@@ -84,8 +88,12 @@ impl Drop for NativeSelectionSession {
 }
 
 struct OverlayState {
+    display: PhysicalRect,
     origin: Option<(i32, i32)>,
     current: Option<(i32, i32)>,
+    hovered: Option<PhysicalRect>,
+    last_hover_scan: Option<Instant>,
+    dragging: bool,
     completed: Option<PhysicalRect>,
     cancelled: bool,
 }
@@ -150,9 +158,69 @@ struct PreviewResources {
     class_name: Vec<u16>,
 }
 
+struct MaskResources {
+    display: PhysicalRect,
+    windows: Vec<HWND>,
+    brush: HBRUSH,
+    class_name: Vec<u16>,
+}
+
+#[derive(Clone, Copy)]
+enum SelectionVisualLayout {
+    FullMask,
+    Selection(PhysicalRect),
+    Hidden,
+}
+
 impl OverlayState {
     fn selection(&self) -> Option<PhysicalRect> {
-        Some(rect_from_points(self.origin?, self.current?))
+        if self.dragging {
+            Some(rect_from_points(self.origin?, self.current?))
+        } else {
+            self.hovered
+        }
+    }
+
+    fn update_hover(&mut self, point: (i32, i32)) {
+        self.hovered = candidate_at_point(self.display, point);
+        self.last_hover_scan = Some(Instant::now());
+    }
+
+    fn update_hover_if_due(&mut self, point: (i32, i32)) {
+        if self
+            .last_hover_scan
+            .is_none_or(|last_scan| last_scan.elapsed() >= SMART_HOVER_SCAN_INTERVAL)
+        {
+            self.update_hover(point);
+        }
+    }
+
+    fn update_drag(&mut self, point: (i32, i32)) {
+        self.current = Some(point);
+        let Some(origin) = self.origin else {
+            return;
+        };
+        if (point.0 - origin.0).abs() >= FREE_SELECTION_DRAG_THRESHOLD
+            || (point.1 - origin.1).abs() >= FREE_SELECTION_DRAG_THRESHOLD
+        {
+            self.dragging = true;
+        }
+    }
+
+    fn finish_pointer_action(&mut self, point: (i32, i32)) {
+        self.update_drag(point);
+        let selection = self.selection().filter(|selection| {
+            selection.width >= MIN_SELECTION_SIZE as u32
+                && selection.height >= MIN_SELECTION_SIZE as u32
+        });
+        self.origin = None;
+        self.current = None;
+        self.dragging = false;
+        if let Some(selection) = selection {
+            self.completed = Some(selection);
+        } else {
+            self.update_hover(point);
+        }
     }
 }
 
@@ -234,8 +302,10 @@ fn run_overlay<F>(
             return;
         }
     };
-    let preview = match unsafe { create_preview_windows(display_bounds) } {
-        Ok(preview) => preview,
+    // Create the dimming mask before the border preview so the border remains
+    // the top-most visual while both sets of windows are visible.
+    let mask = match unsafe { create_mask_windows(display_bounds) } {
+        Ok(mask) => mask,
         Err(error) => {
             unsafe {
                 let _ = DestroyWindow(overlay);
@@ -249,10 +319,42 @@ fn run_overlay<F>(
             return;
         }
     };
+    let preview = match unsafe { create_preview_windows(display_bounds) } {
+        Ok(preview) => preview,
+        Err(error) => {
+            unsafe {
+                let _ = DestroyWindow(overlay);
+                for window in mask.windows {
+                    let _ = DestroyWindow(window);
+                }
+                let _ = DeleteObject(HGDIOBJ(mask.brush.0));
+                let _ = windows::Win32::UI::WindowsAndMessaging::UnregisterClassW(
+                    PCWSTR(mask.class_name.as_ptr()),
+                    Some(module_instance()),
+                );
+                let _ = DeleteObject(HGDIOBJ(overlay_brush.0));
+                let _ = windows::Win32::UI::WindowsAndMessaging::UnregisterClassW(
+                    PCWSTR(overlay_class.as_ptr()),
+                    Some(module_instance()),
+                );
+            }
+            let _ = startup.send(Err(error.to_string()));
+            return;
+        }
+    };
+    let mut preview_selection = overlay_state
+        .selection()
+        .filter(|selection| selection.width > 0 && selection.height > 0);
+    unsafe {
+        let layout = preview_selection.map_or(
+            SelectionVisualLayout::FullMask,
+            SelectionVisualLayout::Selection,
+        );
+        let _ = layout_selection_visuals(&mask, &preview, layout);
+    }
     let _ = startup.send(Ok(()));
 
     let mut borders: Option<BorderResources> = None;
-    let mut preview_selection = None;
     let mut running = true;
     while running {
         unsafe { pump_messages() };
@@ -267,7 +369,8 @@ fn run_overlay<F>(
             if let Some(selection) = overlay_state.completed.take() {
                 unsafe {
                     let _ = DestroyWindow(overlay);
-                    hide_preview_windows(&preview);
+                    let _ =
+                        layout_selection_visuals(&mask, &preview, SelectionVisualLayout::Hidden);
                 }
                 match unsafe { create_border_windows(display_bounds, selection) } {
                     Ok(resources) => {
@@ -285,10 +388,11 @@ fn run_overlay<F>(
                     .filter(|selection| selection.width > 0 && selection.height > 0);
                 if next_preview != preview_selection {
                     unsafe {
-                        match next_preview {
-                            Some(selection) => layout_preview_windows(&preview, selection),
-                            None => hide_preview_windows(&preview),
-                        }
+                        let layout = next_preview.map_or(
+                            SelectionVisualLayout::FullMask,
+                            SelectionVisualLayout::Selection,
+                        );
+                        let _ = layout_selection_visuals(&mask, &preview, layout);
                     }
                     preview_selection = next_preview;
                 }
@@ -328,6 +432,14 @@ fn run_overlay<F>(
         let _ = DeleteObject(HGDIOBJ(preview.brush.0));
         let _ = windows::Win32::UI::WindowsAndMessaging::UnregisterClassW(
             PCWSTR(preview.class_name.as_ptr()),
+            Some(instance),
+        );
+        for window in mask.windows {
+            let _ = DestroyWindow(window);
+        }
+        let _ = DeleteObject(HGDIOBJ(mask.brush.0));
+        let _ = windows::Win32::UI::WindowsAndMessaging::UnregisterClassW(
+            PCWSTR(mask.class_name.as_ptr()),
             Some(instance),
         );
         if let Some(resources) = borders {
@@ -370,8 +482,12 @@ unsafe fn create_overlay_window(
     }
 
     let mut state = Box::new(OverlayState {
+        display: bounds,
         origin: None,
         current: None,
+        hovered: None,
+        last_hover_scan: None,
+        dragging: false,
         completed: None,
         cancelled: false,
     });
@@ -395,6 +511,10 @@ unsafe fn create_overlay_window(
     exclude_window_from_capture(hwnd.0 as isize)?;
     let _ = ShowWindow(hwnd, SW_SHOW);
     let _ = SetForegroundWindow(hwnd);
+    let mut cursor = POINT::default();
+    if GetCursorPos(&mut cursor).is_ok() {
+        state.update_hover((cursor.x - bounds.x, cursor.y - bounds.y));
+    }
     Ok((hwnd, state, brush, class_name))
 }
 
@@ -446,6 +566,91 @@ unsafe fn create_preview_windows(display: PhysicalRect) -> Result<PreviewResourc
     })
 }
 
+unsafe fn create_mask_windows(display: PhysicalRect) -> Result<MaskResources, PlatformError> {
+    let instance = module_instance();
+    let class_name = wide(&format!("FrameFlowSelectionMask-{}", thread_id()));
+    let brush = CreateSolidBrush(COLORREF(0));
+    let class = WNDCLASSW {
+        lpfnWndProc: Some(mask_window_proc),
+        hInstance: instance,
+        hbrBackground: brush,
+        lpszClassName: PCWSTR(class_name.as_ptr()),
+        ..Default::default()
+    };
+    if RegisterClassW(&class) == 0 {
+        return Err(windows::core::Error::from_win32().into());
+    }
+
+    let mut windows = Vec::with_capacity(4);
+    for _ in 0..4 {
+        let hwnd = CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+            PCWSTR(class_name.as_ptr()),
+            w!("FrameFlow 框选遮罩"),
+            WS_POPUP,
+            display.x,
+            display.y,
+            1,
+            1,
+            None,
+            None,
+            Some(instance),
+            None,
+        )?;
+        SetLayeredWindowAttributes(hwnd, COLORREF(0), SELECTION_MASK_ALPHA, LWA_ALPHA)?;
+        exclude_window_from_capture(hwnd.0 as isize)?;
+        windows.push(hwnd);
+    }
+    Ok(MaskResources {
+        display,
+        windows,
+        brush,
+        class_name,
+    })
+}
+
+unsafe extern "system" fn mask_window_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if message == WM_NCHITTEST {
+        return LRESULT(HTTRANSPARENT as isize);
+    }
+    DefWindowProcW(hwnd, message, wparam, lparam)
+}
+
+fn mask_rectangles(display: PhysicalRect, selection: PhysicalRect) -> [(i32, i32, i32, i32); 4] {
+    let selection_left = display.x + selection.x;
+    let selection_top = display.y + selection.y;
+    let selection_right = selection_left + selection.width as i32;
+    let selection_bottom = selection_top + selection.height as i32;
+    let display_right = display.x + display.width as i32;
+    let display_bottom = display.y + display.height as i32;
+    [
+        (display.x, display.y, display.width as i32, selection.y),
+        (
+            display.x,
+            selection_bottom,
+            display.width as i32,
+            display_bottom - selection_bottom,
+        ),
+        (
+            display.x,
+            selection_top,
+            selection.x,
+            selection.height as i32,
+        ),
+        (
+            selection_right,
+            selection_top,
+            display_right - selection_right,
+            selection.height as i32,
+        ),
+    ]
+}
+
 unsafe extern "system" fn preview_window_proc(
     hwnd: HWND,
     message: u32,
@@ -458,33 +663,87 @@ unsafe extern "system" fn preview_window_proc(
     DefWindowProcW(hwnd, message, wparam, lparam)
 }
 
-unsafe fn layout_preview_windows(resources: &PreviewResources, selection: PhysicalRect) {
-    if let Ok(mut batch) = BeginDeferWindowPos(resources.windows.len() as i32) {
-        for (window, role) in &resources.windows {
-            let (x, y, width, height) = window_rect(resources.display, selection, *role);
-            let Ok(next) = DeferWindowPos(
-                batch,
-                *window,
-                None,
-                x,
-                y,
-                width,
-                height,
-                SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW,
-            ) else {
-                hide_preview_windows(resources);
-                return;
-            };
-            batch = next;
-        }
-        let _ = EndDeferWindowPos(batch);
+unsafe fn layout_selection_visuals(
+    mask: &MaskResources,
+    preview: &PreviewResources,
+    layout: SelectionVisualLayout,
+) -> bool {
+    let Ok(mut batch) = BeginDeferWindowPos((mask.windows.len() + preview.windows.len()) as i32)
+    else {
+        return false;
+    };
+    let mask_rects = match layout {
+        SelectionVisualLayout::FullMask | SelectionVisualLayout::Hidden => [
+            (
+                mask.display.x,
+                mask.display.y,
+                mask.display.width as i32,
+                mask.display.height as i32,
+            ),
+            (mask.display.x, mask.display.y, 1, 1),
+            (mask.display.x, mask.display.y, 1, 1),
+            (mask.display.x, mask.display.y, 1, 1),
+        ],
+        SelectionVisualLayout::Selection(selection) => mask_rectangles(mask.display, selection),
+    };
+    for (index, (window, (x, y, width, height))) in mask.windows.iter().zip(mask_rects).enumerate()
+    {
+        let visible = match layout {
+            SelectionVisualLayout::FullMask => index == 0,
+            SelectionVisualLayout::Selection(_) => width > 0 && height > 0,
+            SelectionVisualLayout::Hidden => false,
+        };
+        let Ok(next) = DeferWindowPos(
+            batch,
+            *window,
+            None,
+            x,
+            y,
+            width.max(1),
+            height.max(1),
+            SWP_NOACTIVATE
+                | SWP_NOZORDER
+                | if visible {
+                    SWP_SHOWWINDOW
+                } else {
+                    SWP_HIDEWINDOW
+                },
+        ) else {
+            return false;
+        };
+        batch = next;
     }
-}
-
-unsafe fn hide_preview_windows(resources: &PreviewResources) {
-    for (window, _) in &resources.windows {
-        let _ = ShowWindow(*window, SW_HIDE);
+    for (window, role) in &preview.windows {
+        let (x, y, width, height, visible) = match layout {
+            SelectionVisualLayout::Selection(selection) => {
+                let (x, y, width, height) = window_rect(preview.display, selection, *role);
+                (x, y, width, height, true)
+            }
+            SelectionVisualLayout::FullMask | SelectionVisualLayout::Hidden => {
+                (preview.display.x, preview.display.y, 1, 1, false)
+            }
+        };
+        let Ok(next) = DeferWindowPos(
+            batch,
+            *window,
+            None,
+            x,
+            y,
+            width,
+            height,
+            SWP_NOACTIVATE
+                | SWP_NOZORDER
+                | if visible {
+                    SWP_SHOWWINDOW
+                } else {
+                    SWP_HIDEWINDOW
+                },
+        ) else {
+            return false;
+        };
+        batch = next;
     }
+    EndDeferWindowPos(batch).is_ok()
 }
 
 unsafe fn create_border_windows(
@@ -847,28 +1106,24 @@ unsafe extern "system" fn overlay_window_proc(
         }
         WM_LBUTTONDOWN => {
             let point = point();
+            state.update_hover(point);
             state.origin = Some(point);
             state.current = Some(point);
+            state.dragging = false;
             SetCapture(hwnd);
             LRESULT(0)
         }
         WM_MOUSEMOVE if state.origin.is_some() => {
-            state.current = Some(point());
+            state.update_drag(point());
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            state.update_hover_if_due(point());
             LRESULT(0)
         }
         WM_LBUTTONUP if state.origin.is_some() => {
-            state.current = Some(point());
+            state.finish_pointer_action(point());
             let _ = ReleaseCapture();
-            if let Some(selection) = state.selection() {
-                if selection.width >= MIN_SELECTION_SIZE as u32
-                    && selection.height >= MIN_SELECTION_SIZE as u32
-                {
-                    state.completed = Some(selection);
-                } else {
-                    state.origin = None;
-                    state.current = None;
-                }
-            }
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1),
@@ -934,6 +1189,99 @@ mod tests {
         };
         assert_eq!(rect_from_points((120, 80), (420, 280)), expected);
         assert_eq!(rect_from_points((420, 280), (120, 80)), expected);
+    }
+
+    #[test]
+    fn selection_mask_surrounds_the_clear_capture_region() {
+        let display = PhysicalRect {
+            x: -1920,
+            y: 120,
+            width: 1920,
+            height: 1080,
+        };
+        let selection = PhysicalRect {
+            x: 320,
+            y: 180,
+            width: 1280,
+            height: 720,
+        };
+
+        assert_eq!(
+            mask_rectangles(display, selection),
+            [
+                (-1920, 120, 1920, 180),
+                (-1920, 1020, 1920, 180),
+                (-1920, 300, 320, 720),
+                (-320, 300, 320, 720),
+            ]
+        );
+    }
+
+    #[test]
+    fn click_keeps_the_hovered_smart_candidate() {
+        let candidate = PhysicalRect {
+            x: 100,
+            y: 80,
+            width: 900,
+            height: 600,
+        };
+        let mut state = OverlayState {
+            display: PhysicalRect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            origin: Some((300, 300)),
+            current: Some((300, 300)),
+            hovered: Some(candidate),
+            last_hover_scan: None,
+            dragging: false,
+            completed: None,
+            cancelled: false,
+        };
+
+        state.update_drag((304, 303));
+        assert_eq!(state.selection(), Some(candidate));
+        state.finish_pointer_action((304, 303));
+        assert_eq!(state.completed, Some(candidate));
+    }
+
+    #[test]
+    fn pointer_motion_switches_from_smart_candidate_to_free_selection() {
+        let mut state = OverlayState {
+            display: PhysicalRect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            origin: Some((300, 260)),
+            current: Some((300, 260)),
+            hovered: Some(PhysicalRect {
+                x: 100,
+                y: 80,
+                width: 900,
+                height: 600,
+            }),
+            last_hover_scan: None,
+            dragging: false,
+            completed: None,
+            cancelled: false,
+        };
+
+        state.update_drag((305, 420));
+
+        assert!(state.dragging);
+        assert_eq!(
+            state.selection(),
+            Some(PhysicalRect {
+                x: 300,
+                y: 260,
+                width: 5,
+                height: 160,
+            })
+        );
     }
 
     #[test]
