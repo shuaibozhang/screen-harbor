@@ -135,11 +135,46 @@ struct FinalizationEvent {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct AudioDeviceSnapshot {
+    id: String,
+    name: String,
+    is_default: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct InputSnapshot {
     enabled: bool,
     available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     device_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selected_device_id: Option<String>,
+    devices: Vec<AudioDeviceSnapshot>,
+}
+
+fn audio_input_snapshot(
+    enabled: bool,
+    selected_device_id: Option<&str>,
+    endpoints: &[frameflow_windows::AudioEndpointInfo],
+    default_device_id: Option<&str>,
+) -> InputSnapshot {
+    let active_id = selected_device_id.or(default_device_id);
+    let active = active_id.and_then(|id| endpoints.iter().find(|endpoint| endpoint.id == id));
+    InputSnapshot {
+        enabled,
+        available: active.is_some(),
+        device_name: active.map(|endpoint| endpoint.name.clone()),
+        selected_device_id: selected_device_id.map(ToOwned::to_owned),
+        devices: endpoints
+            .iter()
+            .map(|endpoint| AudioDeviceSnapshot {
+                id: endpoint.id.clone(),
+                name: endpoint.name.clone(),
+                is_default: default_device_id == Some(endpoint.id.as_str()),
+            })
+            .collect(),
+    }
 }
 
 #[derive(Serialize)]
@@ -335,11 +370,12 @@ fn get_app_snapshot(
         .recording_preferences
         .lock()
         .map_err(|_| "recording preferences are unavailable".to_owned())?;
-    let audio_endpoints = frameflow_windows::default_audio_endpoints().unwrap_or_default();
-    let audio_config = *state
+    let audio_endpoints = frameflow_windows::audio_endpoints().unwrap_or_default();
+    let audio_config = state
         .audio_config
         .lock()
-        .map_err(|_| "audio settings are unavailable".to_owned())?;
+        .map_err(|_| "audio settings are unavailable".to_owned())?
+        .clone();
     let audio_label = match (audio_config.system_audio, audio_config.microphone) {
         (true, true) => "系统声 + 麦克风",
         (true, false) => "系统声",
@@ -354,19 +390,21 @@ fn get_app_snapshot(
 
     Ok(AppSnapshot {
         recording_state,
-        save_directory: save_directory.to_string_lossy().into_owned(),
+        save_directory: display_path(&save_directory),
         save_directory_available_bytes,
         global_shortcut_available: state.global_shortcut_available.load(Ordering::Relaxed),
-        microphone: InputSnapshot {
-            enabled: audio_config.microphone,
-            available: audio_endpoints.microphone.is_some(),
-            device_name: audio_endpoints.microphone.map(|endpoint| endpoint.name),
-        },
-        system_audio: InputSnapshot {
-            enabled: audio_config.system_audio,
-            available: audio_endpoints.system_output.is_some(),
-            device_name: audio_endpoints.system_output.map(|endpoint| endpoint.name),
-        },
+        microphone: audio_input_snapshot(
+            audio_config.microphone,
+            audio_config.microphone_device_id.as_deref(),
+            &audio_endpoints.microphones,
+            audio_endpoints.default_microphone_id.as_deref(),
+        ),
+        system_audio: audio_input_snapshot(
+            audio_config.system_audio,
+            audio_config.system_audio_device_id.as_deref(),
+            &audio_endpoints.system_outputs,
+            audio_endpoints.default_system_output_id.as_deref(),
+        ),
         output_summary: if preview_enabled {
             format!(
                 "母版 MP4 · {codec_label} · {} · {capture_fps} FPS · {audio_label} / 预览 {} · {} · {} FPS",
@@ -439,7 +477,7 @@ async fn choose_save_directory(
         .map_err(|_| "storage settings are unavailable".to_owned())? = next;
     app.emit("storage://changed", ())
         .map_err(|error| error.to_string())?;
-    Ok(Some(selected.to_string_lossy().into_owned()))
+    Ok(Some(display_path(&selected)))
 }
 
 fn ensure_storage_change_allowed(state: &AppState) -> Result<(), String> {
@@ -530,6 +568,7 @@ fn set_audio_input(
     state: State<'_, AppState>,
     source: String,
     enabled: bool,
+    device_id: Option<String>,
 ) -> Result<(), String> {
     if state
         .recording
@@ -540,12 +579,32 @@ fn set_audio_input(
     {
         return Err("audio inputs can only be changed while idle".to_owned());
     }
+    let endpoints = frameflow_windows::audio_endpoints().map_err(|error| error.to_string())?;
+    let (devices, default_id) = match source.as_str() {
+        "microphone" => (
+            &endpoints.microphones,
+            endpoints.default_microphone_id.as_deref(),
+        ),
+        "systemAudio" => (
+            &endpoints.system_outputs,
+            endpoints.default_system_output_id.as_deref(),
+        ),
+        _ => return Err("unknown audio input".to_owned()),
+    };
+    if let Some(device_id) = device_id.as_deref() {
+        if enabled && !devices.iter().any(|device| device.id == device_id) {
+            return Err("the selected audio device is unavailable".to_owned());
+        }
+    } else if enabled && default_id.is_none() {
+        return Err("the default audio device is unavailable".to_owned());
+    }
     if enabled {
-        let endpoints =
-            frameflow_windows::default_audio_endpoints().map_err(|error| error.to_string())?;
         let available = match source.as_str() {
-            "microphone" => endpoints.microphone.is_some(),
-            "systemAudio" => endpoints.system_output.is_some(),
+            "microphone" | "systemAudio" => {
+                device_id.as_deref().map_or(default_id.is_some(), |id| {
+                    devices.iter().any(|device| device.id == id)
+                })
+            }
             _ => return Err("unknown audio input".to_owned()),
         };
         if !available {
@@ -558,11 +617,17 @@ fn set_audio_input(
             .lock()
             .map_err(|_| "audio settings are unavailable".to_owned())?;
         match source.as_str() {
-            "microphone" => config.microphone = enabled,
-            "systemAudio" => config.system_audio = enabled,
+            "microphone" => {
+                config.microphone = enabled;
+                config.microphone_device_id = device_id;
+            }
+            "systemAudio" => {
+                config.system_audio = enabled;
+                config.system_audio_device_id = device_id;
+            }
             _ => return Err("unknown audio input".to_owned()),
         }
-        *config
+        config.clone()
     };
     save_audio_config(&app, next)
 }
@@ -1240,10 +1305,11 @@ fn start_capture(
         height: selection.capture_rect.height,
     });
     let output_size = CaptureOutputSize::new(resolved_output.width, resolved_output.height)?;
-    let audio_config = *state
+    let audio_config = state
         .audio_config
         .lock()
-        .map_err(|_| "audio settings are unavailable".to_owned())?;
+        .map_err(|_| "audio settings are unavailable".to_owned())?
+        .clone();
     let event_app = app.clone();
     let capture = CaptureWorkerClient::start(
         &selection,
@@ -1913,6 +1979,17 @@ fn storage_directories(state: &AppState) -> Result<Vec<PathBuf>, String> {
         .map_err(|_| "storage settings are unavailable".to_owned())
 }
 
+fn display_path(path: &std::path::Path) -> String {
+    let path = path.to_string_lossy();
+    if let Some(path) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{path}")
+    } else if let Some(path) = path.strip_prefix(r"\\?\") {
+        path.to_owned()
+    } else {
+        path.into_owned()
+    }
+}
+
 fn recording_id() -> Result<String, String> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2208,21 +2285,23 @@ fn recording_index<'a>(
     state: &'a AppState,
     app: &tauri::AppHandle,
 ) -> Result<&'a RecordingIndex, String> {
-    state
+    let directories = state
+        .storage_config
+        .lock()
+        .map_err(|_| "storage settings are unavailable".to_owned())?
+        .library_directories
+        .clone();
+    let index = state
         .recording_index
         .get_or_init(|| {
-            let directories = state
-                .storage_config
-                .lock()
-                .map_err(|_| "storage settings are unavailable".to_owned())?
-                .library_directories
-                .clone();
-            let index = RecordingIndex::open(recording_index_path(app)?, directories)?;
+            let index = RecordingIndex::open(recording_index_path(app)?, directories.clone())?;
             index.reconcile()?;
             Ok(index)
         })
         .as_ref()
-        .map_err(Clone::clone)
+        .map_err(Clone::clone)?;
+    index.synchronize_directories(directories)?;
+    Ok(index)
 }
 
 fn load_audio_config(app: &tauri::AppHandle) -> AudioInputConfig {
@@ -2432,6 +2511,37 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn audio_snapshot_resolves_defaults_and_explicit_devices() {
+        let endpoints = vec![
+            frameflow_windows::AudioEndpointInfo {
+                id: "default".to_owned(),
+                name: "Default microphone".to_owned(),
+            },
+            frameflow_windows::AudioEndpointInfo {
+                id: "usb".to_owned(),
+                name: "USB microphone".to_owned(),
+            },
+        ];
+        let following_default = audio_input_snapshot(true, None, &endpoints, Some("default"));
+        assert!(following_default.available);
+        assert_eq!(
+            following_default.device_name.as_deref(),
+            Some("Default microphone")
+        );
+        assert!(following_default.selected_device_id.is_none());
+
+        let explicit = audio_input_snapshot(true, Some("usb"), &endpoints, Some("default"));
+        assert!(explicit.available);
+        assert_eq!(explicit.device_name.as_deref(), Some("USB microphone"));
+        assert_eq!(explicit.selected_device_id.as_deref(), Some("usb"));
+
+        let disconnected = audio_input_snapshot(true, Some("missing"), &endpoints, Some("default"));
+        assert!(!disconnected.available);
+        assert!(disconnected.device_name.is_none());
+    }
 
     #[test]
     fn recording_countdown_is_disabled_by_default() {
@@ -2579,6 +2689,22 @@ mod tests {
         assert!(group.is_dir());
 
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn hides_windows_verbatim_prefixes_in_display_paths() {
+        assert_eq!(
+            display_path(Path::new(r"\\?\E:\Work\Record")),
+            r"E:\Work\Record"
+        );
+        assert_eq!(
+            display_path(Path::new(r"\\?\UNC\server\share\Record")),
+            r"\\server\share\Record"
+        );
+        assert_eq!(
+            display_path(Path::new(r"E:\Work\Record")),
+            r"E:\Work\Record"
+        );
     }
 
     #[test]

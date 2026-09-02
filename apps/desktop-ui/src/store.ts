@@ -9,18 +9,20 @@ interface AppStore {
   hydrate: () => Promise<void>;
   startSelection: () => Promise<void>;
   updateOutputSettings: (fps: number, resolution: OutputResolution, previewFormat: OutputFormat, previewResolution: OutputResolution, previewFps: number) => Promise<void>;
-  updateAudioInput: (source: "microphone" | "systemAudio", enabled: boolean) => Promise<void>;
+  updateAudioInput: (source: "microphone" | "systemAudio", enabled: boolean, deviceId?: string) => Promise<void>;
   updatePreviewEnabled: (enabled: boolean) => Promise<void>;
   updateRecordingPreferences: (countdownEnabled: boolean, countdownSeconds: number) => Promise<void>;
   updateSaveDirectory: () => Promise<boolean>;
 }
 
-export const useAppStore = create<AppStore>((set) => ({
+export const useAppStore = create<AppStore>((set, get) => ({
   snapshot: null,
   loading: true,
   error: null,
   hydrate: async () => {
-    set({ loading: true, error: null });
+    // Keep an already-rendered screen in place while background events refresh
+    // the snapshot. The full loading shell is only for the first launch.
+    set({ loading: get().snapshot === null, error: null });
     try {
       set({ snapshot: await getAppSnapshot(), loading: false });
     } catch {
@@ -43,9 +45,9 @@ export const useAppStore = create<AppStore>((set) => ({
       throw cause;
     }
   },
-  updateAudioInput: async (source, enabled) => {
+  updateAudioInput: async (source, enabled, deviceId) => {
     try {
-      await setAudioInput(source, enabled);
+      await setAudioInput(source, enabled, deviceId);
       set({ snapshot: await getAppSnapshot(), error: null });
     } catch (cause) {
       set({ error: `无法更新音频输入：${String(cause)}` });

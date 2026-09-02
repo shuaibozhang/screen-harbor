@@ -4,9 +4,10 @@ use windows::{
         Devices::FunctionDiscovery::PKEY_Device_FriendlyName,
         Media::Audio::{
             eCapture, eMultimedia, eRender, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator,
+            DEVICE_STATE_ACTIVE,
         },
         System::Com::StructuredStorage::PropVariantToString,
-        System::Com::{CoCreateInstance, CLSCTX_ALL, STGM_READ},
+        System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL, STGM_READ},
     },
 };
 
@@ -14,7 +15,16 @@ use crate::{com::ComApartment, PlatformError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioEndpointInfo {
+    pub id: String,
     pub name: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AudioEndpoints {
+    pub microphones: Vec<AudioEndpointInfo>,
+    pub system_outputs: Vec<AudioEndpointInfo>,
+    pub default_microphone_id: Option<String>,
+    pub default_system_output_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -38,15 +48,69 @@ pub fn default_audio_endpoints() -> Result<DefaultAudioEndpoints, PlatformError>
     Ok(endpoints)
 }
 
+/// Enumerates all active capture and render endpoints and identifies the
+/// current multimedia-role defaults. Endpoint IDs are stable Windows device
+/// identifiers and can be passed back when starting a capture session.
+pub fn audio_endpoints() -> Result<AudioEndpoints, PlatformError> {
+    let com = ComApartment::enter_multithreaded()?;
+    let enumerator: IMMDeviceEnumerator =
+        unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)? };
+    let default_microphone_id = default_endpoint_id(&enumerator, eCapture);
+    let default_system_output_id = default_endpoint_id(&enumerator, eRender);
+    let endpoints = AudioEndpoints {
+        microphones: enumerate_endpoints(&enumerator, eCapture),
+        system_outputs: enumerate_endpoints(&enumerator, eRender),
+        default_microphone_id,
+        default_system_output_id,
+    };
+    drop(com);
+    Ok(endpoints)
+}
+
 fn default_endpoint(
     enumerator: &IMMDeviceEnumerator,
     flow: windows::Win32::Media::Audio::EDataFlow,
 ) -> Option<AudioEndpointInfo> {
     let device = unsafe { enumerator.GetDefaultAudioEndpoint(flow, eMultimedia) }.ok()?;
-    endpoint_name(&device)
-        .ok()
-        .filter(|name| !name.is_empty())
-        .map(|name| AudioEndpointInfo { name })
+    endpoint_info(&device)
+}
+
+fn default_endpoint_id(
+    enumerator: &IMMDeviceEnumerator,
+    flow: windows::Win32::Media::Audio::EDataFlow,
+) -> Option<String> {
+    let device = unsafe { enumerator.GetDefaultAudioEndpoint(flow, eMultimedia) }.ok()?;
+    endpoint_id(&device).ok()
+}
+
+fn enumerate_endpoints(
+    enumerator: &IMMDeviceEnumerator,
+    flow: windows::Win32::Media::Audio::EDataFlow,
+) -> Vec<AudioEndpointInfo> {
+    let Ok(collection) = (unsafe { enumerator.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE) })
+    else {
+        return Vec::new();
+    };
+    let Ok(count) = (unsafe { collection.GetCount() }) else {
+        return Vec::new();
+    };
+    (0..count)
+        .filter_map(|index| unsafe { collection.Item(index) }.ok())
+        .filter_map(|device| endpoint_info(&device))
+        .collect()
+}
+
+fn endpoint_info(device: &IMMDevice) -> Option<AudioEndpointInfo> {
+    let id = endpoint_id(device).ok()?;
+    let name = endpoint_name(device).ok()?.trim().to_owned();
+    (!name.is_empty()).then_some(AudioEndpointInfo { id, name })
+}
+
+fn endpoint_id(device: &IMMDevice) -> Result<String, WindowsError> {
+    let value = unsafe { device.GetId() }?;
+    let id = unsafe { value.to_string() };
+    unsafe { CoTaskMemFree(Some(value.0.cast())) };
+    Ok(id?)
 }
 
 fn endpoint_name(device: &IMMDevice) -> Result<String, WindowsError> {

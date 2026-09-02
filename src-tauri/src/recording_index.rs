@@ -489,6 +489,23 @@ impl RecordingIndex {
         Ok(())
     }
 
+    pub(crate) fn synchronize_directories(
+        &self,
+        directories: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<(), String> {
+        let synchronized = normalize_recording_directories(directories)?;
+        let mut registered = self
+            .recording_directories
+            .write()
+            .map_err(|_| "recording directory registry is unavailable".to_owned())?;
+        for directory in synchronized {
+            if !registered.iter().any(|existing| existing == &directory) {
+                registered.push(directory);
+            }
+        }
+        Ok(())
+    }
+
     fn recording_directories(&self) -> Result<Vec<PathBuf>, String> {
         self.recording_directories
             .read()
@@ -1682,6 +1699,25 @@ mod tests {
             index.path_for_id("1700000000021").unwrap(),
             new.canonicalize().unwrap()
         );
+    }
+
+    #[test]
+    fn late_loaded_directories_are_synchronized_before_reconciliation() {
+        let workspace = TestWorkspace::new("late-loaded-root");
+        let index = workspace.index();
+        let late_root = workspace.0.join("late-recordings");
+        fs::create_dir_all(&late_root).unwrap();
+        let recording = late_root.join("FrameFlow-1700000000030.mp4");
+        fs::write(&recording, b"\0\0\0\x18ftypisom\0\0\0\0isomiso2").unwrap();
+
+        index.synchronize_directories([late_root.clone()]).unwrap();
+        index.reconcile().unwrap();
+
+        assert!(index
+            .recent(10)
+            .unwrap()
+            .iter()
+            .any(|candidate| candidate.id == "1700000000030"));
     }
 
     #[test]

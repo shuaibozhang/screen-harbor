@@ -31,11 +31,15 @@ pub const CAPTURE_WORKER_PROTOCOL_VERSION: u16 = 2;
 const AUDIO_MIXER_TICK: Duration = Duration::from_millis(10);
 const AUDIO_RENDER_DELAY: Duration = Duration::from_millis(100);
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioInputConfig {
     pub microphone: bool,
     pub system_audio: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub microphone_device_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_audio_device_id: Option<String>,
 }
 
 impl Default for AudioInputConfig {
@@ -43,6 +47,8 @@ impl Default for AudioInputConfig {
         Self {
             microphone: false,
             system_audio: true,
+            microphone_device_id: None,
+            system_audio_device_id: None,
         }
     }
 }
@@ -1193,14 +1199,16 @@ fn start_active_audio(
         event_handler: Arc::clone(&event_handler),
     };
     let mut sources = Vec::new();
-    for (enabled, capture_source, source_id) in [
+    for (enabled, endpoint_id, capture_source, source_id) in [
         (
             config.system_audio,
+            config.system_audio_device_id.clone(),
             frameflow_windows::AudioCaptureSource::SystemOutput,
             frameflow_windows::AudioSourceId::System,
         ),
         (
             config.microphone,
+            config.microphone_device_id.clone(),
             frameflow_windows::AudioCaptureSource::Microphone,
             frameflow_windows::AudioSourceId::Microphone,
         ),
@@ -1208,7 +1216,12 @@ fn start_active_audio(
         if !enabled {
             continue;
         }
-        match start_audio_source(capture_source, source_id, callback_context.clone()) {
+        match start_audio_source(
+            capture_source,
+            endpoint_id,
+            source_id,
+            callback_context.clone(),
+        ) {
             Ok(source) => sources.push(source),
             Err(error) => {
                 record_audio_error(
@@ -1242,70 +1255,75 @@ fn start_active_audio(
 
 fn start_audio_source(
     capture_source: frameflow_windows::AudioCaptureSource,
+    endpoint_id: Option<String>,
     source_id: frameflow_windows::AudioSourceId,
     context: AudioCallbackContext,
 ) -> Result<ActiveAudioSource, frameflow_windows::PlatformError> {
     let mut callback_stopped = false;
-    let session = frameflow_windows::start_wasapi_capture(capture_source, move |result| {
-        let kind = if result.is_ok() {
-            AudioCallbackKind::Packet
-        } else {
-            AudioCallbackKind::Failure
-        };
-        if !should_handle_audio_callback(
-            kind,
-            callback_stopped,
-            context.paused.load(Ordering::Acquire),
-        ) {
-            return;
-        }
-        match result {
-            Ok(mut packet) => {
-                packet.qpc_position_100ns = packet
-                    .qpc_position_100ns
-                    .saturating_sub(context.pause_offset_100ns.load(Ordering::Acquire));
-                match context.worker_input.try_send(AudioWorkerMessage::Packet {
-                    source: source_id,
-                    packet,
-                }) {
-                    Ok(()) => {
-                        context.queue_overloaded.store(false, Ordering::Release);
-                    }
-                    Err(mpsc::TrySendError::Full(_)) => {
-                        context.dropped_packets.fetch_add(1, Ordering::Relaxed);
-                        if !context.queue_overloaded.swap(true, Ordering::AcqRel) {
-                            record_audio_error(
-                                &context.event_handler,
-                                &context.warning,
-                                source_id,
-                                "音频输入队列过载，已丢弃瞬时数据".to_owned(),
-                            );
+    let session = frameflow_windows::start_wasapi_capture_from_device(
+        capture_source,
+        endpoint_id,
+        move |result| {
+            let kind = if result.is_ok() {
+                AudioCallbackKind::Packet
+            } else {
+                AudioCallbackKind::Failure
+            };
+            if !should_handle_audio_callback(
+                kind,
+                callback_stopped,
+                context.paused.load(Ordering::Acquire),
+            ) {
+                return;
+            }
+            match result {
+                Ok(mut packet) => {
+                    packet.qpc_position_100ns = packet
+                        .qpc_position_100ns
+                        .saturating_sub(context.pause_offset_100ns.load(Ordering::Acquire));
+                    match context.worker_input.try_send(AudioWorkerMessage::Packet {
+                        source: source_id,
+                        packet,
+                    }) {
+                        Ok(()) => {
+                            context.queue_overloaded.store(false, Ordering::Release);
+                        }
+                        Err(mpsc::TrySendError::Full(_)) => {
+                            context.dropped_packets.fetch_add(1, Ordering::Relaxed);
+                            if !context.queue_overloaded.swap(true, Ordering::AcqRel) {
+                                record_audio_error(
+                                    &context.event_handler,
+                                    &context.warning,
+                                    source_id,
+                                    "音频输入队列过载，已丢弃瞬时数据".to_owned(),
+                                );
+                            }
+                        }
+                        Err(mpsc::TrySendError::Disconnected(_)) => {
+                            context
+                                .failures
+                                .source(source_id)
+                                .store(true, Ordering::Release);
+                            callback_stopped = true;
                         }
                     }
-                    Err(mpsc::TrySendError::Disconnected(_)) => {
-                        context
-                            .failures
-                            .source(source_id)
-                            .store(true, Ordering::Release);
-                        callback_stopped = true;
-                    }
+                }
+                Err(error) => {
+                    record_audio_error(
+                        &context.event_handler,
+                        &context.warning,
+                        source_id,
+                        error.to_string(),
+                    );
+                    context
+                        .failures
+                        .source(source_id)
+                        .store(true, Ordering::Release);
+                    callback_stopped = true;
                 }
             }
-            Err(error) => {
-                record_audio_error(
-                    &context.event_handler,
-                    &context.warning,
-                    source_id,
-                    error.to_string(),
-                );
-                context
-                    .failures
-                    .source(source_id)
-                    .store(true, Ordering::Release);
-                callback_stopped = true;
-            }
-        }
-    })?;
+        },
+    )?;
     Ok(ActiveAudioSource {
         id: source_id,
         session,
@@ -1605,6 +1623,18 @@ mod tests {
         let config = AudioInputConfig::default();
         assert!(config.system_audio);
         assert!(!config.microphone);
+        assert!(config.system_audio_device_id.is_none());
+        assert!(config.microphone_device_id.is_none());
+    }
+
+    #[test]
+    fn legacy_audio_config_uses_system_defaults() {
+        let config: AudioInputConfig =
+            serde_json::from_str(r#"{"microphone":true,"systemAudio":false}"#).unwrap();
+        assert!(config.microphone);
+        assert!(!config.system_audio);
+        assert!(config.microphone_device_id.is_none());
+        assert!(config.system_audio_device_id.is_none());
     }
 
     #[test]

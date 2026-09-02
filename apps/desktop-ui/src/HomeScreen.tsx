@@ -32,10 +32,12 @@ interface HomeScreenProps {
   selectedRecordingIds: Set<string>;
   openingRecording: string | null;
   deletingRecordings: boolean;
+  removingRecordingIds: Set<string>;
+  removingInterruptedId: string | null;
   onOpenSettings: () => void;
   onStartSelection: () => void;
   onChangeSaveDirectory: () => void;
-  onToggleAudio: (source: "microphone" | "systemAudio", enabled: boolean) => void;
+  onChangeAudio: (source: "microphone" | "systemAudio", enabled: boolean, deviceId?: string) => void;
   onTogglePreview: (enabled: boolean) => void;
   onShowAllRecordings: (visible: boolean) => void;
   onRecordingQueryChange: (query: string) => void;
@@ -111,10 +113,12 @@ export function HomeScreen({
   selectedRecordingIds,
   openingRecording,
   deletingRecordings,
+  removingRecordingIds,
+  removingInterruptedId,
   onOpenSettings,
   onStartSelection,
   onChangeSaveDirectory,
-  onToggleAudio,
+  onChangeAudio,
   onTogglePreview,
   onShowAllRecordings,
   onRecordingQueryChange,
@@ -161,38 +165,58 @@ export function HomeScreen({
         <section className="home-section" aria-labelledby="audio-heading">
           <h1 id="audio-heading">录制声音</h1>
           <div className="preference-list">
-            <button
-              className="preference-row preference-action"
-              type="button"
-              role="switch"
-              aria-checked={snapshot.microphone.enabled}
-              disabled={!snapshot.microphone.available || savingAudio !== null || !canConfigure}
-              onClick={() => onToggleAudio("microphone", !snapshot.microphone.enabled)}
-            >
+            <div className="preference-row audio-preference-row">
               <Mic2 size={28} strokeWidth={1.45} />
               <span className="preference-copy">
                 <strong>麦克风</strong>
-                <small>{snapshot.microphone.deviceName ?? "未找到可用麦克风"}</small>
+                <select
+                  aria-label="选择麦克风"
+                  value={snapshot.microphone.selectedDeviceId ?? ""}
+                  disabled={savingAudio !== null || !canConfigure}
+                  onChange={(event) => onChangeAudio("microphone", snapshot.microphone.enabled, event.currentTarget.value || undefined)}
+                >
+                  <option value="">跟随系统默认{snapshot.microphone.devices.some((device) => device.isDefault) ? "" : "（当前不可用）"}</option>
+                  {snapshot.microphone.selectedDeviceId && !snapshot.microphone.devices.some((device) => device.id === snapshot.microphone.selectedDeviceId) && <option value={snapshot.microphone.selectedDeviceId}>之前选择的麦克风（当前不可用）</option>}
+                  {snapshot.microphone.devices.map((device) => <option key={device.id} value={device.id}>{device.name}{device.isDefault ? "（当前默认）" : ""}</option>)}
+                </select>
               </span>
               <span className="preference-state">{snapshot.microphone.available ? (snapshot.microphone.enabled ? "已开启" : "未开启") : "不可用"}</span>
-              <ChevronDown size={17} />
-            </button>
-            <button
-              className="preference-row preference-action"
-              type="button"
-              role="switch"
-              aria-checked={snapshot.systemAudio.enabled}
-              disabled={!snapshot.systemAudio.available || savingAudio !== null || !canConfigure}
-              onClick={() => onToggleAudio("systemAudio", !snapshot.systemAudio.enabled)}
-            >
+              <button
+                className={snapshot.microphone.enabled ? "sage-switch enabled" : "sage-switch"}
+                type="button"
+                role="switch"
+                aria-label="录制麦克风"
+                aria-checked={snapshot.microphone.enabled}
+                disabled={(!snapshot.microphone.available && !snapshot.microphone.enabled) || savingAudio !== null || !canConfigure}
+                onClick={() => onChangeAudio("microphone", !snapshot.microphone.enabled, snapshot.microphone.selectedDeviceId)}
+              ><span /></button>
+            </div>
+            <div className="preference-row audio-preference-row">
               <MonitorSpeaker size={28} strokeWidth={1.45} />
               <span className="preference-copy">
                 <strong>系统声音</strong>
-                <small>{snapshot.systemAudio.deviceName ?? "未找到可用输出设备"}</small>
+                <select
+                  aria-label="选择系统声音输出设备"
+                  value={snapshot.systemAudio.selectedDeviceId ?? ""}
+                  disabled={savingAudio !== null || !canConfigure}
+                  onChange={(event) => onChangeAudio("systemAudio", snapshot.systemAudio.enabled, event.currentTarget.value || undefined)}
+                >
+                  <option value="">跟随系统默认{snapshot.systemAudio.devices.some((device) => device.isDefault) ? "" : "（当前不可用）"}</option>
+                  {snapshot.systemAudio.selectedDeviceId && !snapshot.systemAudio.devices.some((device) => device.id === snapshot.systemAudio.selectedDeviceId) && <option value={snapshot.systemAudio.selectedDeviceId}>之前选择的输出设备（当前不可用）</option>}
+                  {snapshot.systemAudio.devices.map((device) => <option key={device.id} value={device.id}>{device.name}{device.isDefault ? "（当前默认）" : ""}</option>)}
+                </select>
               </span>
               <span className="preference-state">{snapshot.systemAudio.available ? (snapshot.systemAudio.enabled ? "已开启" : "未开启") : "不可用"}</span>
-              <ChevronDown size={17} />
-            </button>
+              <button
+                className={snapshot.systemAudio.enabled ? "sage-switch enabled" : "sage-switch"}
+                type="button"
+                role="switch"
+                aria-label="录制系统声音"
+                aria-checked={snapshot.systemAudio.enabled}
+                disabled={(!snapshot.systemAudio.available && !snapshot.systemAudio.enabled) || savingAudio !== null || !canConfigure}
+                onClick={() => onChangeAudio("systemAudio", !snapshot.systemAudio.enabled, snapshot.systemAudio.selectedDeviceId)}
+              ><span /></button>
+            </div>
           </div>
         </section>
 
@@ -247,7 +271,7 @@ export function HomeScreen({
             <p className="section-note"><AlertTriangle size={16} />异常退出留下的文件已原样保留，可打开位置检查或移入回收站。</p>
             <div className="preference-list">
               {snapshot.interruptedRecordings.map((recording) => (
-                <div className="interrupted-row" key={recording.id}>
+                <div className={`interrupted-row${removingInterruptedId === recording.id ? " removing" : ""}`} key={recording.id}>
                   <FileVideo2 size={25} strokeWidth={1.45} />
                   <span className="preference-copy"><strong>{recording.name}</strong><small>{recording.createdLabel} · {formatFileSize(recording.fileSizeBytes)}</small></span>
                   <button className="row-tool" type="button" onClick={() => onOpenInterruptedLocation(recording.id)}><FolderOpen size={16} />打开位置</button>
@@ -286,7 +310,7 @@ export function HomeScreen({
           ) : (
             <div className={`home-recording-list ${showAllRecordings || normalizedQuery ? "expanded" : ""}`}>
               {visibleRecordings.map((recording) => (
-                <article className="home-recording" key={recording.id}>
+                <article className={`home-recording${removingRecordingIds.has(recording.id) ? " removing" : ""}`} key={recording.id}>
                   <input className="recording-select" type="checkbox" aria-label={`选择 ${recording.name}`} checked={selectedRecordingIds.has(recording.id)} onChange={() => onToggleRecordingSelection(recording.id)} />
                   <RecordingThumbnail recording={recording} />
                   <div className="recording-copy">

@@ -862,7 +862,7 @@ dependencies = [
 
 [[package]]
 name = "frameflow"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "frameflow-capture",
  "frameflow-core",
@@ -880,7 +880,7 @@ dependencies = [
 
 [[package]]
 name = "frameflow-capture"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "thiserror 2.0.20",
@@ -888,7 +888,7 @@ dependencies = [
 
 [[package]]
 name = "frameflow-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "thiserror 2.0.20",
@@ -896,7 +896,7 @@ dependencies = [
 
 [[package]]
 name = "frameflow-media"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -905,7 +905,7 @@ dependencies = [
 
 [[package]]
 name = "frameflow-recorder"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "frameflow-capture",
  "frameflow-windows",
@@ -917,7 +917,7 @@ dependencies = [
 
 [[package]]
 name = "frameflow-windows"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "frameflow-capture",
  "thiserror 2.0.20",

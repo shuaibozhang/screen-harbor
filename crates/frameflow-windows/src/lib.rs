@@ -28,8 +28,8 @@ pub use selection_overlay::{
 pub use shell::{choose_recording_directory, move_paths_to_recycle_bin};
 pub use wasapi_loopback::{
     start_microphone_capture, start_system_audio_loopback, start_wasapi_capture,
-    AudioCaptureSource, AudioPacket, AudioSampleFormat, AudioStreamFormat, WasapiCaptureSession,
-    WasapiLoopbackSession,
+    start_wasapi_capture_from_device, AudioCaptureSource, AudioPacket, AudioSampleFormat,
+    AudioStreamFormat, WasapiCaptureSession, WasapiLoopbackSession,
 };
 pub use wgc::{
     capture_primary_frame, capture_region_frame, start_region_capture, start_region_mp4_capture,
@@ -125,4 +125,7 @@ pub fn exclude_window_from_capture(hwnd: isize) -> Result<(), PlatformError> {
     unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)? };
     Ok(())
 }
-pub use audio_devices::{default_audio_endpoints, AudioEndpointInfo, DefaultAudioEndpoints};
+pub use audio_devices::{
+    audio_endpoints, default_audio_endpoints, AudioEndpointInfo, AudioEndpoints,
+    DefaultAudioEndpoints,
+};

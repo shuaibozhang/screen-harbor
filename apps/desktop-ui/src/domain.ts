@@ -57,8 +57,8 @@ export interface AppSnapshot {
   saveDirectory: string;
   saveDirectoryAvailableBytes?: number;
   globalShortcutAvailable: boolean;
-  microphone: { enabled: boolean; deviceName?: string; available: boolean };
-  systemAudio: { enabled: boolean; deviceName?: string; available: boolean };
+  microphone: AudioInputSnapshot;
+  systemAudio: AudioInputSnapshot;
   outputSummary: string;
   captureFps: number;
   outputResolution: OutputResolution;
@@ -74,6 +74,20 @@ export interface AppSnapshot {
   countdownSeconds: number;
   recentRecordings: RecentRecording[];
   interruptedRecordings: InterruptedRecording[];
+}
+
+export interface AudioDevice {
+  id: string;
+  name: string;
+  isDefault: boolean;
+}
+
+export interface AudioInputSnapshot {
+  enabled: boolean;
+  deviceName?: string;
+  available: boolean;
+  selectedDeviceId?: string;
+  devices: AudioDevice[];
 }
 
 export interface DisplayChangeEvent {

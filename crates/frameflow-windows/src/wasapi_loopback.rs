@@ -158,11 +158,30 @@ pub fn start_wasapi_capture<F>(
 where
     F: FnMut(Result<AudioPacket, PlatformError>) + Send + 'static,
 {
+    start_wasapi_capture_from_device(source, None, callback)
+}
+
+pub fn start_wasapi_capture_from_device<F>(
+    source: AudioCaptureSource,
+    endpoint_id: Option<String>,
+    callback: F,
+) -> Result<WasapiCaptureSession, PlatformError>
+where
+    F: FnMut(Result<AudioPacket, PlatformError>) + Send + 'static,
+{
     let (control_sender, control_receiver) = mpsc::channel();
     let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
     let worker = thread::Builder::new()
         .name(source.worker_name().to_owned())
-        .spawn(move || run_capture_worker(source, callback, control_receiver, startup_sender))
+        .spawn(move || {
+            run_capture_worker(
+                source,
+                endpoint_id,
+                callback,
+                control_receiver,
+                startup_sender,
+            )
+        })
         .map_err(|error| PlatformError::WorkerUnavailable(error.to_string()))?;
 
     match startup_receiver.recv_timeout(Duration::from_secs(5)) {
@@ -188,6 +207,7 @@ where
 
 fn run_capture_worker<F>(
     source: AudioCaptureSource,
+    endpoint_id: Option<String>,
     mut callback: F,
     control: mpsc::Receiver<()>,
     startup: mpsc::SyncSender<Result<AudioStreamFormat, String>>,
@@ -202,7 +222,7 @@ where
             return Err(error.into());
         }
     };
-    let setup = setup_capture(source);
+    let setup = setup_capture(source, endpoint_id.as_deref());
     let (audio_client, capture_client, format, event) = match setup {
         Ok(resources) => resources,
         Err(error) => {
@@ -235,6 +255,7 @@ where
 
 fn setup_capture(
     source: AudioCaptureSource,
+    endpoint_id: Option<&str>,
 ) -> Result<
     (
         IAudioClient,
@@ -247,8 +268,14 @@ fn setup_capture(
     let enumerator: IMMDeviceEnumerator =
         unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
             .map_err(|error| audio_error("create endpoint enumerator", error))?;
-    let endpoint = unsafe { enumerator.GetDefaultAudioEndpoint(source.data_flow(), eMultimedia) }
-        .map_err(|error| audio_error("open default audio endpoint", error))?;
+    let endpoint = if let Some(endpoint_id) = endpoint_id {
+        let endpoint_id: Vec<u16> = endpoint_id.encode_utf16().chain(Some(0)).collect();
+        unsafe { enumerator.GetDevice(PCWSTR(endpoint_id.as_ptr())) }
+            .map_err(|error| audio_error("open selected audio endpoint", error))?
+    } else {
+        unsafe { enumerator.GetDefaultAudioEndpoint(source.data_flow(), eMultimedia) }
+            .map_err(|error| audio_error("open default audio endpoint", error))?
+    };
     let audio_client: IAudioClient = unsafe { endpoint.Activate(CLSCTX_ALL, None) }
         .map_err(|error| audio_error("activate audio client", error))?;
     let mix_format = MixFormat::get(&audio_client)?;

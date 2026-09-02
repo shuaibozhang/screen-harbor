@@ -6,8 +6,24 @@ const developmentSnapshot: AppSnapshot = {
   saveDirectory: "D:\\FrameFlow\\Recordings",
   saveDirectoryAvailableBytes: 128 * 1024 * 1024 * 1024,
   globalShortcutAvailable: true,
-  microphone: { enabled: true, deviceName: "默认麦克风", available: true },
-  systemAudio: { enabled: false, deviceName: "扬声器（默认设备）", available: true },
+  microphone: {
+    enabled: true,
+    deviceName: "阵列麦克风",
+    available: true,
+    devices: [
+      { id: "development-mic", name: "阵列麦克风", isDefault: true },
+      { id: "development-usb-mic", name: "USB 麦克风", isDefault: false },
+    ],
+  },
+  systemAudio: {
+    enabled: false,
+    deviceName: "扬声器",
+    available: true,
+    devices: [
+      { id: "development-speakers", name: "扬声器", isDefault: true },
+      { id: "development-headphones", name: "蓝牙耳机", isDefault: false },
+    ],
+  },
   outputSummary: "母版 MP4 · H.264/AAC · 原始分辨率 · 30 FPS · 系统声 / 预览 WebM · 最高 854×480 · 15 FPS",
   captureFps: 30,
   outputResolution: { mode: "native" },
@@ -60,12 +76,19 @@ export async function setOutputSettings(
 export async function setAudioInput(
   source: "microphone" | "systemAudio",
   enabled: boolean,
+  deviceId?: string,
 ): Promise<void> {
   if (isTauriRuntime()) {
-    await invoke("set_audio_input", { source, enabled });
+    await invoke("set_audio_input", { source, enabled, deviceId: deviceId ?? null });
     return;
   }
   developmentSnapshot[source].enabled = enabled;
+  developmentSnapshot[source].selectedDeviceId = deviceId;
+  const selected = deviceId
+    ? developmentSnapshot[source].devices.find((device) => device.id === deviceId)
+    : developmentSnapshot[source].devices.find((device) => device.isDefault);
+  developmentSnapshot[source].deviceName = selected?.name;
+  developmentSnapshot[source].available = selected !== undefined;
 }
 
 export async function setPreviewEnabled(enabled: boolean): Promise<void> {

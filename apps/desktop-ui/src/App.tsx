@@ -5,7 +5,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { isTauriRuntime } from "./bridge";
 import { HomeScreen } from "./HomeScreen";
 import { useAppStore } from "./store";
@@ -14,6 +14,11 @@ import "./styles.css";
 
 type ResolutionChoice = "native" | "1080p" | "720p" | "custom";
 type PreviewResolutionChoice = "480p" | "360p" | "240p" | "custom";
+
+function waitForRemovalTransition() {
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return Promise.resolve();
+  return new Promise<void>((resolve) => window.setTimeout(resolve, 200));
+}
 
 function resolutionChoice(resolution: OutputResolution): ResolutionChoice {
   if (resolution.mode === "native") return "native";
@@ -82,9 +87,12 @@ export function App() {
   const [selectedRecordingIds, setSelectedRecordingIds] = useState<Set<string>>(new Set());
   const [deleteConfirmation, setDeleteConfirmation] = useState<{ ids: string[]; names: string[] } | null>(null);
   const [deletingRecordings, setDeletingRecordings] = useState(false);
+  const [removingRecordingIds, setRemovingRecordingIds] = useState<Set<string>>(new Set());
   const [changingSaveDirectory, setChangingSaveDirectory] = useState(false);
   const [interruptedDeleteConfirmation, setInterruptedDeleteConfirmation] = useState<InterruptedRecording | null>(null);
   const [deletingInterrupted, setDeletingInterrupted] = useState(false);
+  const [removingInterruptedId, setRemovingInterruptedId] = useState<string | null>(null);
+  const suppressLibraryRefresh = useRef(false);
 
   useEffect(() => {
     void hydrate();
@@ -115,7 +123,7 @@ export function App() {
       else unlistenFinalization = dispose;
     });
     void listen("recording://library-changed", () => {
-      void hydrate();
+      if (!suppressLibraryRefresh.current) void hydrate();
     }).then((dispose) => {
       if (disposed) dispose();
       else unlistenLibrary = dispose;
@@ -230,10 +238,10 @@ export function App() {
     && draftCountdownEnabled === snapshot.countdownEnabled
     && draftCountdownSeconds === snapshot.countdownSeconds;
 
-  const toggleAudio = async (source: "microphone" | "systemAudio", enabled: boolean) => {
+  const updateAudio = async (source: "microphone" | "systemAudio", enabled: boolean, deviceId?: string) => {
     setSavingAudio(source);
     try {
-      await updateAudioInput(source, enabled);
+      await updateAudioInput(source, enabled, deviceId);
     } finally {
       setSavingAudio(null);
     }
@@ -281,20 +289,26 @@ export function App() {
 
   const confirmRecordingDeletion = async () => {
     if (!deleteConfirmation) return;
+    const deletedIds = [...deleteConfirmation.ids];
     setDeletingRecordings(true);
+    suppressLibraryRefresh.current = true;
     try {
-      await invoke("delete_recordings", { recordingIds: deleteConfirmation.ids });
+      await invoke("delete_recordings", { recordingIds: deletedIds });
       setSelectedRecordingIds((current) => {
         const next = new Set(current);
-        deleteConfirmation.ids.forEach((id) => next.delete(id));
+        deletedIds.forEach((id) => next.delete(id));
         return next;
       });
       setDeleteConfirmation(null);
       setFinalizationError(null);
+      setRemovingRecordingIds(new Set(deletedIds));
+      await waitForRemovalTransition();
       await hydrate();
     } catch (deleteError) {
       setFinalizationError(String(deleteError));
     } finally {
+      suppressLibraryRefresh.current = false;
+      setRemovingRecordingIds(new Set());
       setDeletingRecordings(false);
     }
   };
@@ -311,17 +325,23 @@ export function App() {
 
   const confirmInterruptedDeletion = async () => {
     if (!interruptedDeleteConfirmation) return;
+    const deletedId = interruptedDeleteConfirmation.id;
     setDeletingInterrupted(true);
+    suppressLibraryRefresh.current = true;
     try {
       await invoke("delete_interrupted_recording", {
-        recordingId: interruptedDeleteConfirmation.id,
+        recordingId: deletedId,
       });
       setInterruptedDeleteConfirmation(null);
       setFinalizationError(null);
+      setRemovingInterruptedId(deletedId);
+      await waitForRemovalTransition();
       await hydrate();
     } catch (deleteError) {
       setFinalizationError(String(deleteError));
     } finally {
+      suppressLibraryRefresh.current = false;
+      setRemovingInterruptedId(null);
       setDeletingInterrupted(false);
     }
   };
@@ -339,10 +359,12 @@ export function App() {
         selectedRecordingIds={selectedRecordingIds}
         openingRecording={openingRecording}
         deletingRecordings={deletingRecordings}
+        removingRecordingIds={removingRecordingIds}
+        removingInterruptedId={removingInterruptedId}
         onOpenSettings={openSettings}
         onStartSelection={() => void startSelection()}
         onChangeSaveDirectory={() => void changeSaveDirectory()}
-        onToggleAudio={(source, enabled) => void toggleAudio(source, enabled)}
+        onChangeAudio={(source, enabled, deviceId) => void updateAudio(source, enabled, deviceId)}
         onTogglePreview={(enabled) => void togglePreview(enabled)}
         onShowAllRecordings={setShowAllRecordings}
         onRecordingQueryChange={setRecordingQuery}
