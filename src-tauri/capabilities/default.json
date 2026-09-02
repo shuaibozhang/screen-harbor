@@ -3,5 +3,11 @@
   "identifier": "default",
   "description": "Minimal permissions for the FrameFlow main, selection, and recording control windows.",
   "windows": ["main", "selection", "recording-controls"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close"
+  ]
 }

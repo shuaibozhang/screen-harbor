@@ -2,21 +2,32 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Play, RotateCcw, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { RecordingState, RegionSelection } from "./domain";
+import type { RecordingPreferences, RecordingState, RegionSelection } from "./domain";
 import "./selection-controls.css";
 
 export function SelectionControls() {
   const [selection, setSelection] = useState<RegionSelection | null>(null);
   const [phase, setPhase] = useState<RecordingState>("idle");
   const [countdown, setCountdown] = useState(3);
+  const [preferences, setPreferences] = useState<RecordingPreferences>({
+    countdownEnabled: false,
+    countdownSeconds: 3,
+  });
   const [error, setError] = useState<string | null>(null);
   const [drawing, setDrawing] = useState(false);
 
   useEffect(() => {
     document.documentElement.dataset.window = "selection-controls";
-    void invoke<RegionSelection | null>("get_current_selection")
-      .then(setSelection)
-      .catch(() => undefined);
+    const refreshInitialState = async () => {
+      const [currentSelection, currentPreferences] = await Promise.all([
+        invoke<RegionSelection | null>("get_current_selection"),
+        invoke<RecordingPreferences>("get_recording_preferences"),
+      ]);
+      setSelection(currentSelection);
+      setPreferences(currentPreferences);
+      setCountdown(currentPreferences.countdownSeconds);
+    };
+    void refreshInitialState().catch(() => undefined);
     let disposed = false;
     let unlistenSelection: (() => void) | undefined;
     let unlistenSelectionStarted: (() => void) | undefined;
@@ -33,6 +44,12 @@ export function SelectionControls() {
       setSelection(null);
       setDrawing(true);
       setError(null);
+      void invoke<RecordingPreferences>("get_recording_preferences")
+        .then((currentPreferences) => {
+          setPreferences(currentPreferences);
+          setCountdown(currentPreferences.countdownSeconds);
+        })
+        .catch(() => undefined);
     }).then((dispose) => {
       if (disposed) dispose();
       else unlistenSelectionStarted = dispose;
@@ -56,13 +73,13 @@ export function SelectionControls() {
   }, []);
 
   useEffect(() => {
-    if (phase !== "countdown") return;
+    if (phase !== "countdown" || !preferences.countdownEnabled) return;
     let cancelled = false;
     const run = async () => {
-      for (const value of [3, 2, 1]) {
+      for (let value = preferences.countdownSeconds; value >= 1; value -= 1) {
         if (cancelled) return;
         setCountdown(value);
-        await new Promise((resolve) => window.setTimeout(resolve, 850));
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
       }
       if (cancelled) return;
       try {
@@ -74,7 +91,7 @@ export function SelectionControls() {
     };
     void run();
     return () => { cancelled = true; };
-  }, [phase]);
+  }, [phase, preferences.countdownEnabled, preferences.countdownSeconds]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -88,6 +105,9 @@ export function SelectionControls() {
   const start = async () => {
     try {
       await invoke("start_countdown");
+      if (!preferences.countdownEnabled) {
+        await invoke("start_capture");
+      }
       setError(null);
     } catch (cause) {
       setError(String(cause));
@@ -102,7 +122,7 @@ export function SelectionControls() {
           {isDrawing
             ? "智能选择区域"
             : phase === "countdown"
-            ? `${countdown} 秒后开始`
+            ? preferences.countdownEnabled ? `${countdown} 秒后开始` : "正在开始"
             : selection
               ? `${selection.captureRect.width} × ${selection.captureRect.height}`
               : "等待选区"}
@@ -111,7 +131,7 @@ export function SelectionControls() {
           {isDrawing
             ? "单击选窗口 · 拖动自由框选 · Esc 取消"
             : phase === "countdown"
-              ? "Esc 取消"
+              ? preferences.countdownEnabled ? "Esc 取消" : "正在启动录制"
               : "拖边框缩放 · 顶部手柄移动"}
         </span>
         {phase !== "countdown" && !isDrawing && (

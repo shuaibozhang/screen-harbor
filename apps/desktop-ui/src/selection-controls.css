@@ -3,18 +3,119 @@ html[data-window="selection-controls"] body,
 html[data-window="selection-controls"] #root {
   width: 100%;
   height: 100%;
+  max-height: 56px;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  background: #151b28;
+  background: #faf8f3;
 }
 
-.selection-controls-shell { box-sizing: border-box; width: 100%; height: 100%; color: white; user-select: none; }
-.selection-controls-bar { box-sizing: border-box; display: flex; width: 100%; height: 56px; align-items: center; gap: 8px; padding: 7px 8px 7px 12px; border: 1px solid #30394a; background: #151b28; white-space: nowrap; }
-.selection-controls-bar strong { color: #9fb8ff; font-size: 12px; font-variant-numeric: tabular-nums; }
-.selection-controls-bar span { flex: 1; color: #9da8ba; font-size: 11px; }
-.selection-controls-bar button { display: flex; height: 32px; align-items: center; gap: 6px; padding: 0 9px; border: 0; border-radius: 7px; color: #dce5f5; background: #293142; cursor: pointer; font-size: 12px; }
-.selection-controls-bar button.primary { color: white; background: #4269e1; }
-.selection-controls-bar button.icon { width: 32px; justify-content: center; padding: 0; }
-.selection-controls-bar button:disabled { cursor: default; opacity: .5; }
-.selection-controls-error { position: absolute; right: 8px; bottom: 2px; left: 8px; overflow: hidden; color: #ffd7d9; font-size: 10px; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+.selection-controls-shell {
+  box-sizing: border-box;
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: stretch;
+  color: #202723;
+  user-select: none;
+}
+
+.selection-controls-bar {
+  box-sizing: border-box;
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px 0 12px;
+  border: 1px solid #dedad1;
+  background: #faf8f3;
+  box-shadow: 0 8px 24px rgba(41, 48, 43, .08);
+  white-space: nowrap;
+}
+
+.selection-controls-bar > * {
+  align-self: center;
+}
+
+.selection-controls-bar strong {
+  color: #566a5d;
+  font-size: 11px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.selection-controls-bar span {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: #737970;
+  font-size: 10px;
+  line-height: 1;
+  text-overflow: ellipsis;
+}
+
+.selection-controls-bar button {
+  display: flex;
+  height: 30px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 9px;
+  border: 1px solid #dedad1;
+  border-radius: 7px;
+  color: #414a43;
+  background: #f1eee6;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  transition: border-color .15s ease, background .15s ease, color .15s ease;
+}
+
+.selection-controls-bar button svg {
+  display: block;
+  flex: none;
+}
+
+.selection-controls-bar button:hover:not(:disabled) {
+  border-color: #c9d1c9;
+  color: #566a5d;
+  background: #e8eee8;
+}
+
+.selection-controls-bar button.primary {
+  border-color: #566a5d;
+  color: #fffdfa;
+  background: #566a5d;
+}
+
+.selection-controls-bar button.primary:hover:not(:disabled) {
+  border-color: #485b50;
+  color: #fffdfa;
+  background: #485b50;
+}
+
+.selection-controls-bar button.icon {
+  width: 30px;
+  justify-content: center;
+  padding: 0;
+  background: transparent;
+}
+
+.selection-controls-bar button:disabled {
+  cursor: default;
+  opacity: .45;
+}
+
+.selection-controls-error {
+  position: absolute;
+  right: 8px;
+  bottom: 2px;
+  left: 8px;
+  overflow: hidden;
+  color: #8d4e47;
+  font-size: 9px;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

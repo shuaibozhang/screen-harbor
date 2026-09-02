@@ -221,13 +221,17 @@ impl RecordingManifest {
         duration_ms: u64,
         resolution: Resolution,
         frames_per_second: u16,
-        preview_profile: PreviewProfile,
+        preview_profile: Option<PreviewProfile>,
+        cover_enabled: bool,
     ) -> Self {
+        let preview_enabled = preview_profile.is_some();
+        let preview_profile = preview_profile.unwrap_or_default();
         let preview_name = format!(
             "preview.{}",
             match preview_profile.format {
                 PreviewFormat::Mp4 => "mp4",
                 PreviewFormat::Webm => "webm",
+                PreviewFormat::AnimatedWebp => "webp",
             }
         );
         Self {
@@ -250,32 +254,44 @@ impl RecordingManifest {
                     height: Some(resolution.height),
                     frames_per_second: Some(frames_per_second),
                 },
-                preview: OutputArtifact {
-                    status: OutputStatus::Pending,
-                    path: Some(preview_name),
-                    file_size_bytes: None,
-                    error: None,
-                    width: None,
-                    height: None,
-                    frames_per_second: None,
+                preview: if preview_enabled {
+                    OutputArtifact {
+                        status: OutputStatus::Pending,
+                        path: Some(preview_name),
+                        file_size_bytes: None,
+                        error: None,
+                        width: None,
+                        height: None,
+                        frames_per_second: None,
+                    }
+                } else {
+                    unrequested_artifact()
                 },
-                cover: OutputArtifact {
-                    status: OutputStatus::Pending,
-                    path: Some("cover-preview.webp".to_owned()),
-                    file_size_bytes: None,
-                    error: None,
-                    width: None,
-                    height: None,
-                    frames_per_second: None,
+                cover: if cover_enabled {
+                    OutputArtifact {
+                        status: OutputStatus::Pending,
+                        path: Some("cover-preview.webp".to_owned()),
+                        file_size_bytes: None,
+                        error: None,
+                        width: None,
+                        height: None,
+                        frames_per_second: None,
+                    }
+                } else {
+                    unrequested_artifact()
                 },
-                high_resolution_cover: OutputArtifact {
-                    status: OutputStatus::Pending,
-                    path: Some("cover-high.webp".to_owned()),
-                    file_size_bytes: None,
-                    error: None,
-                    width: None,
-                    height: None,
-                    frames_per_second: None,
+                high_resolution_cover: if cover_enabled {
+                    OutputArtifact {
+                        status: OutputStatus::Pending,
+                        path: Some("cover-high.webp".to_owned()),
+                        file_size_bytes: None,
+                        error: None,
+                        width: None,
+                        height: None,
+                        frames_per_second: None,
+                    }
+                } else {
+                    unrequested_artifact()
                 },
             },
         }
@@ -497,7 +513,8 @@ impl RecordingIndex {
         duration: Duration,
         resolution: Resolution,
         frames_per_second: u16,
-        preview_profile: PreviewProfile,
+        preview_profile: Option<PreviewProfile>,
+        cover_enabled: bool,
     ) -> Result<String, String> {
         let mut recording = inspect_recording(output_path)?
             .ok_or_else(|| "finalized recording is not a readable MP4".to_owned())?;
@@ -510,11 +527,16 @@ impl RecordingIndex {
                 resolution,
                 frames_per_second,
                 preview_profile,
+                cover_enabled,
             );
             let manifest_path = recording.group_directory.join(MANIFEST_FILE_NAME);
             write_manifest_atomically(&manifest_path, &manifest)?;
             recording.manifest_path = Some(manifest_path);
-            recording.preview_status = OutputStatus::Pending;
+            recording.preview_status = if manifest.outputs.preview.status == OutputStatus::Pending {
+                OutputStatus::Pending
+            } else {
+                OutputStatus::NotRequested
+            };
         }
         self.with_connection(|connection| {
             connection
@@ -1433,7 +1455,9 @@ fn is_preview_artifact(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| {
-            name.eq_ignore_ascii_case("preview.mp4") || name.eq_ignore_ascii_case("preview.webm")
+            name.eq_ignore_ascii_case("preview.mp4")
+                || name.eq_ignore_ascii_case("preview.webm")
+                || name.eq_ignore_ascii_case("preview.webp")
         })
 }
 
@@ -1538,7 +1562,8 @@ mod tests {
                         height: 1080,
                     },
                     60,
-                    PreviewProfile::default(),
+                    Some(PreviewProfile::default()),
+                    true,
                 )
                 .unwrap();
         }
@@ -1779,6 +1804,37 @@ mod tests {
     }
 
     #[test]
+    fn disabled_preview_marks_preview_and_covers_as_not_requested() {
+        let workspace = TestWorkspace::new("preview-disabled");
+        let path = workspace.group_recording("1700000000019");
+        let index = workspace.index();
+
+        index
+            .record_completed(
+                &path,
+                Duration::from_secs(3),
+                Resolution {
+                    width: 1920,
+                    height: 1080,
+                },
+                60,
+                None,
+                false,
+            )
+            .unwrap();
+
+        let details = index.details("1700000000019").unwrap();
+        assert_eq!(details.preview.status, OutputStatus::NotRequested);
+        assert_eq!(details.cover.status, OutputStatus::NotRequested);
+        assert_eq!(
+            details.high_resolution_cover.status,
+            OutputStatus::NotRequested
+        );
+        assert!(index.recoverable_preview_paths().unwrap().is_empty());
+        assert!(index.recoverable_cover_ids().unwrap().is_empty());
+    }
+
+    #[test]
     fn webm_preview_profile_is_frozen_in_the_recording_group() {
         let workspace = TestWorkspace::new("webm-preview-profile");
         let path = workspace.group_recording("1700000000020");
@@ -1799,7 +1855,8 @@ mod tests {
                     height: 1080,
                 },
                 60,
-                profile,
+                Some(profile),
+                true,
             )
             .unwrap();
 
@@ -1814,6 +1871,39 @@ mod tests {
         let manifest = read_manifest(&path.parent().unwrap().join(MANIFEST_FILE_NAME)).unwrap();
         assert_eq!(manifest.outputs.preview.width, Some(1280));
         assert_eq!(manifest.outputs.preview.height, Some(720));
+    }
+
+    #[test]
+    fn animated_webp_preview_uses_the_recording_group_contract() {
+        let workspace = TestWorkspace::new("animated-webp-preview-profile");
+        let path = workspace.group_recording("1700000000021");
+        let index = workspace.index();
+        let profile = PreviewProfile {
+            format: PreviewFormat::AnimatedWebp,
+            maximum_width: 640,
+            maximum_height: 360,
+            frames_per_second: 10,
+            include_audio: false,
+        };
+        index
+            .record_completed(
+                &path,
+                Duration::from_secs(3),
+                Resolution {
+                    width: 1920,
+                    height: 1080,
+                },
+                30,
+                Some(profile),
+                true,
+            )
+            .unwrap();
+
+        let job = index.prepare_preview_for_path(&path).unwrap();
+        assert_eq!(job.output_path.file_name().unwrap(), "preview.webp");
+        assert_eq!(job.temporary_path.file_name().unwrap(), "preview.webp.part");
+        assert_eq!(job.profile.format, PreviewFormat::AnimatedWebp);
+        assert!(!job.profile.include_audio);
     }
 
     #[test]

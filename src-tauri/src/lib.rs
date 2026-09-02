@@ -64,6 +64,7 @@ struct AppState {
     native_selection: Mutex<Option<frameflow_windows::NativeDisplaySelectionSession>>,
     output_config: Mutex<OutputConfig>,
     audio_config: Mutex<AudioInputConfig>,
+    recording_preferences: Mutex<RecordingPreferences>,
     display_watcher: Mutex<Option<frameflow_windows::DisplayChangeSession>>,
     storage_config: Mutex<StorageConfig>,
     global_shortcut_available: AtomicBool,
@@ -153,13 +154,52 @@ struct AppSnapshot {
     output_summary: String,
     capture_fps: u16,
     output_resolution: OutputResolution,
+    preview_enabled: bool,
     preview_format: OutputFormat,
     preview_resolution: OutputResolution,
+    preview_fps: u16,
     supported_capture_fps: [u16; 3],
+    supported_preview_fps: [u16; 4],
     monitor_refresh_rate_hz: Option<u32>,
     recommended_capture_fps: u16,
+    countdown_enabled: bool,
+    countdown_seconds: u8,
     recent_recordings: Vec<RecordingSummary>,
     interrupted_recordings: Vec<InterruptedRecording>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+struct RecordingPreferences {
+    countdown_enabled: bool,
+    countdown_seconds: u8,
+}
+
+impl Default for RecordingPreferences {
+    fn default() -> Self {
+        Self {
+            countdown_enabled: false,
+            countdown_seconds: 3,
+        }
+    }
+}
+
+impl RecordingPreferences {
+    fn normalized(self) -> Self {
+        Self {
+            countdown_enabled: self.countdown_enabled,
+            countdown_seconds: self.countdown_seconds.clamp(1, 10),
+        }
+    }
+}
+
+#[tauri::command]
+fn get_recording_preferences(state: State<'_, AppState>) -> Result<RecordingPreferences, String> {
+    state
+        .recording_preferences
+        .lock()
+        .map(|preferences| *preferences)
+        .map_err(|_| "recording preferences are unavailable".to_owned())
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -187,6 +227,7 @@ struct DisplayChangeEvent {
 }
 
 const SUPPORTED_CAPTURE_FPS: [u16; 3] = [24, 30, 60];
+const SUPPORTED_PREVIEW_FPS: [u16; 4] = [10, 15, 24, 30];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ExitDecision {
@@ -279,6 +320,7 @@ fn get_app_snapshot(
         .clone();
     let capture_fps = output_config.main.fps;
     let output_resolution = output_config.main.resolution;
+    let preview_enabled = output_config.preview.is_some();
     let preview = output_config.preview.clone().unwrap_or_else(|| {
         OutputConfig::default()
             .preview
@@ -289,6 +331,10 @@ fn get_app_snapshot(
         .ok_or_else(|| "no capture display is available".to_owned())?;
     let monitor_refresh_rate_hz = reference_display.refresh_rate_hz;
     let recommended_capture_fps = recommended_capture_fps(monitor_refresh_rate_hz);
+    let recording_preferences = *state
+        .recording_preferences
+        .lock()
+        .map_err(|_| "recording preferences are unavailable".to_owned())?;
     let audio_endpoints = frameflow_windows::default_audio_endpoints().unwrap_or_default();
     let audio_config = *state
         .audio_config
@@ -321,20 +367,32 @@ fn get_app_snapshot(
             available: audio_endpoints.system_output.is_some(),
             device_name: audio_endpoints.system_output.map(|endpoint| endpoint.name),
         },
-        output_summary: format!(
-            "母版 MP4 · {codec_label} · {} · {capture_fps} FPS · {audio_label} / 预览 {} · {} · {} FPS",
-            output_resolution_label(output_resolution),
-            output_format_label(preview.format),
-            output_resolution_label(preview.resolution),
-            preview.fps,
-        ),
+        output_summary: if preview_enabled {
+            format!(
+                "母版 MP4 · {codec_label} · {} · {capture_fps} FPS · {audio_label} / 预览 {} · {} · {} FPS",
+                output_resolution_label(output_resolution),
+                output_format_label(preview.format),
+                output_resolution_label(preview.resolution),
+                preview.fps,
+            )
+        } else {
+            format!(
+                "母版 MP4 · {codec_label} · {} · {capture_fps} FPS · {audio_label} / 不生成轻量预览和封面",
+                output_resolution_label(output_resolution),
+            )
+        },
         capture_fps,
         output_resolution,
+        preview_enabled,
         preview_format: preview.format,
         preview_resolution: preview.resolution,
+        preview_fps: preview.fps,
         supported_capture_fps: SUPPORTED_CAPTURE_FPS,
+        supported_preview_fps: SUPPORTED_PREVIEW_FPS,
         monitor_refresh_rate_hz,
         recommended_capture_fps,
+        countdown_enabled: recording_preferences.countdown_enabled,
+        countdown_seconds: recording_preferences.countdown_seconds,
         recent_recordings,
         interrupted_recordings,
     })
@@ -650,27 +708,23 @@ fn output_format_label(format: OutputFormat) -> &'static str {
     }
 }
 
-fn preview_profile(config: &OutputConfig) -> PreviewProfile {
-    let fallback = OutputConfig::default();
-    let preview = config
-        .preview
-        .as_ref()
-        .or(fallback.preview.as_ref())
-        .expect("default output config has a preview profile");
+fn preview_profile(config: &OutputConfig) -> Option<PreviewProfile> {
+    let preview = config.preview.as_ref()?;
     let (maximum_width, maximum_height) = match preview.resolution {
         OutputResolution::FitWithin { width, height } => (width, height),
         OutputResolution::Native => (854, 480),
     };
-    PreviewProfile {
+    Some(PreviewProfile {
         format: match preview.format {
             OutputFormat::Webm => PreviewFormat::Webm,
+            OutputFormat::AnimatedWebp => PreviewFormat::AnimatedWebp,
             _ => PreviewFormat::Mp4,
         },
         maximum_width,
         maximum_height,
         frames_per_second: preview.fps,
         include_audio: preview.include_audio,
-    }
+    })
 }
 
 #[tauri::command]
@@ -681,6 +735,7 @@ fn set_output_settings(
     resolution: OutputResolution,
     preview_format: OutputFormat,
     preview_resolution: OutputResolution,
+    preview_fps: u16,
 ) -> Result<(), String> {
     if !SUPPORTED_CAPTURE_FPS.contains(&fps) {
         return Err(format!("unsupported capture frame rate: {fps} FPS"));
@@ -688,8 +743,17 @@ fn set_output_settings(
     if !resolution.is_valid() {
         return Err("output resolution must be at least 2×2".to_owned());
     }
-    if !matches!(preview_format, OutputFormat::Mp4 | OutputFormat::Webm) {
-        return Err("preview format must be MP4 or WebM".to_owned());
+    if !matches!(
+        preview_format,
+        OutputFormat::Mp4 | OutputFormat::Webm | OutputFormat::AnimatedWebp
+    ) {
+        return Err("preview format must be MP4, WebM, or animated WebP".to_owned());
+    }
+    if !SUPPORTED_PREVIEW_FPS.contains(&preview_fps) {
+        return Err(format!("unsupported preview frame rate: {preview_fps} FPS"));
+    }
+    if preview_fps > fps {
+        return Err("preview frame rate cannot exceed the master frame rate".to_owned());
     }
     let OutputResolution::FitWithin {
         width: preview_width,
@@ -721,6 +785,8 @@ fn set_output_settings(
     if let Some(preview) = &mut next.preview {
         preview.format = preview_format;
         preview.resolution = preview_resolution;
+        preview.fps = preview_fps;
+        preview.include_audio = preview_format != OutputFormat::AnimatedWebp;
     }
     next = next.normalized();
     save_output_config(&app, &next)?;
@@ -728,6 +794,77 @@ fn set_output_settings(
         .output_config
         .lock()
         .map_err(|_| "output settings are unavailable".to_owned())? = next;
+    Ok(())
+}
+
+#[tauri::command]
+fn set_preview_enabled(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    if state
+        .recording
+        .lock()
+        .map_err(|_| "recording state is unavailable".to_owned())?
+        .state()
+        != RecordingState::Idle
+    {
+        return Err("preview generation can only be changed while idle".to_owned());
+    }
+
+    let mut next = state
+        .output_config
+        .lock()
+        .map_err(|_| "output settings are unavailable".to_owned())?
+        .clone();
+    if enabled {
+        if next.preview.is_none() {
+            next.preview = OutputConfig::default().preview;
+        }
+        next.cover_enabled = true;
+    } else {
+        next.preview = None;
+        next.cover_enabled = false;
+    }
+    next = next.normalized();
+    save_output_config(&app, &next)?;
+    *state
+        .output_config
+        .lock()
+        .map_err(|_| "output settings are unavailable".to_owned())? = next;
+    Ok(())
+}
+
+#[tauri::command]
+fn set_recording_preferences(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    countdown_enabled: bool,
+    countdown_seconds: u8,
+) -> Result<(), String> {
+    if !(1..=10).contains(&countdown_seconds) {
+        return Err("countdown duration must be between 1 and 10 seconds".to_owned());
+    }
+    if state
+        .recording
+        .lock()
+        .map_err(|_| "recording state is unavailable".to_owned())?
+        .state()
+        != RecordingState::Idle
+    {
+        return Err("recording preferences can only be changed while idle".to_owned());
+    }
+
+    let next = RecordingPreferences {
+        countdown_enabled,
+        countdown_seconds,
+    };
+    save_recording_preferences(&app, next)?;
+    *state
+        .recording_preferences
+        .lock()
+        .map_err(|_| "recording preferences are unavailable".to_owned())? = next;
     Ok(())
 }
 
@@ -1403,11 +1540,12 @@ fn complete_finalization(app: &tauri::AppHandle, result: Result<FinalizedCapture
                 .and_then(|name| name.to_str())
                 .unwrap_or("FrameFlow recording.mp4")
                 .to_owned();
-            let frozen_preview_profile = state
+            let (frozen_preview_profile, cover_enabled) = state
                 .output_config
                 .lock()
-                .map(|config| preview_profile(&config))
-                .unwrap_or_default();
+                .map(|config| (preview_profile(&config), config.cover_enabled))
+                .unwrap_or((None, false));
+            let should_generate_preview = frozen_preview_profile.is_some();
             let recording_id = match recording_index(&state, app).and_then(|index| {
                 index.record_completed(
                     &finalized.output_path,
@@ -1418,21 +1556,26 @@ fn complete_finalization(app: &tauri::AppHandle, result: Result<FinalizedCapture
                     },
                     finalized.frames_per_second.min(u32::from(u16::MAX)) as u16,
                     frozen_preview_profile,
+                    cover_enabled,
                 )
             }) {
                 Ok(recording_id) => {
-                    match recording_index(&state, app)
-                        .and_then(|index| index.prepare_preview_for_path(&finalized.output_path))
-                    {
-                        Ok(job) => {
-                            if let Err(error) =
-                                launch_media_job(app.clone(), MediaJobSpec::Preview(job))
-                            {
-                                eprintln!("failed to schedule preview for {file_name}: {error}");
+                    if should_generate_preview {
+                        match recording_index(&state, app).and_then(|index| {
+                            index.prepare_preview_for_path(&finalized.output_path)
+                        }) {
+                            Ok(job) => {
+                                if let Err(error) =
+                                    launch_media_job(app.clone(), MediaJobSpec::Preview(job))
+                                {
+                                    eprintln!(
+                                        "failed to schedule preview for {file_name}: {error}"
+                                    );
+                                }
                             }
-                        }
-                        Err(error) => {
-                            eprintln!("failed to prepare preview for {file_name}: {error}");
+                            Err(error) => {
+                                eprintln!("failed to prepare preview for {file_name}: {error}");
+                            }
                         }
                     }
                     Some(recording_id)
@@ -1815,12 +1958,16 @@ fn load_output_config(app: &tauri::AppHandle) -> OutputConfig {
 
 fn normalize_loaded_output_config(config: OutputConfig) -> OutputConfig {
     let mut config = config;
-    if config.preview.is_none() {
+    if config.preview.is_none() && config.cover_enabled {
         config.preview = OutputConfig::default().preview;
     }
+    config.cover_enabled = config.preview.is_some();
     let mut config = config.normalized();
     if let Some(preview) = &mut config.preview {
-        if !matches!(preview.format, OutputFormat::Mp4 | OutputFormat::Webm) {
+        if !matches!(
+            preview.format,
+            OutputFormat::Mp4 | OutputFormat::Webm | OutputFormat::AnimatedWebp
+        ) {
             preview.format = OutputFormat::Mp4;
         }
         if !matches!(preview.resolution, OutputResolution::FitWithin { width, height } if width >= 2 && height >= 2 && width <= 3840 && height <= 2160)
@@ -1830,7 +1977,10 @@ fn normalize_loaded_output_config(config: OutputConfig) -> OutputConfig {
                 height: 480,
             };
         }
-        preview.fps = 15.min(config.main.fps);
+        if !SUPPORTED_PREVIEW_FPS.contains(&preview.fps) {
+            preview.fps = 15;
+        }
+        preview.fps = preview.fps.min(config.main.fps);
     }
     if SUPPORTED_CAPTURE_FPS.contains(&config.main.fps) && config.main.resolution.is_valid() {
         config
@@ -1854,6 +2004,37 @@ fn audio_config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .app_config_dir()
         .map(|directory| directory.join("audio.json"))
         .map_err(|error| error.to_string())
+}
+
+fn recording_preferences_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|directory| directory.join("recording.json"))
+        .map_err(|error| error.to_string())
+}
+
+fn load_recording_preferences(app: &tauri::AppHandle) -> RecordingPreferences {
+    recording_preferences_path(app)
+        .and_then(|path| fs::read(path).map_err(|error| error.to_string()))
+        .and_then(|bytes| {
+            serde_json::from_slice::<RecordingPreferences>(&bytes)
+                .map_err(|error| error.to_string())
+        })
+        .map(RecordingPreferences::normalized)
+        .unwrap_or_default()
+}
+
+fn save_recording_preferences(
+    app: &tauri::AppHandle,
+    preferences: RecordingPreferences,
+) -> Result<(), String> {
+    let path = recording_preferences_path(app)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "recording preferences directory is unavailable".to_owned())?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let json = serde_json::to_vec_pretty(&preferences).map_err(|error| error.to_string())?;
+    fs::write(path, json).map_err(|error| error.to_string())
 }
 
 fn storage_config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -2099,6 +2280,7 @@ pub fn run() {
             native_selection: Mutex::new(None),
             output_config: Mutex::new(OutputConfig::default().normalized()),
             audio_config: Mutex::new(AudioInputConfig::default()),
+            recording_preferences: Mutex::new(RecordingPreferences::default()),
             display_watcher: Mutex::new(None),
             storage_config: Mutex::new(StorageConfig::default()),
             global_shortcut_available: AtomicBool::new(false),
@@ -2134,6 +2316,11 @@ pub fn run() {
                 .audio_config
                 .lock()
                 .expect("audio settings are unavailable") = audio_config;
+            let recording_preferences = load_recording_preferences(app.handle());
+            *app.state::<AppState>()
+                .recording_preferences
+                .lock()
+                .expect("recording preferences are unavailable") = recording_preferences;
             let storage_config = load_storage_config(app.handle());
             for directory in &storage_config.library_directories {
                 if directory.is_dir() {
@@ -2211,6 +2398,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_app_snapshot,
+            get_recording_preferences,
             choose_save_directory,
             open_recording_location,
             get_recording_details,
@@ -2220,6 +2408,8 @@ pub fn run() {
             retry_preview,
             retry_cover,
             set_output_settings,
+            set_preview_enabled,
+            set_recording_preferences,
             set_audio_input,
             begin_selection,
             get_current_selection,
@@ -2242,6 +2432,29 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recording_countdown_is_disabled_by_default() {
+        let preferences = RecordingPreferences::default();
+        assert!(!preferences.countdown_enabled);
+        assert_eq!(preferences.countdown_seconds, 3);
+    }
+
+    #[test]
+    fn persisted_countdown_duration_is_kept_within_supported_bounds() {
+        let too_short = RecordingPreferences {
+            countdown_enabled: true,
+            countdown_seconds: 0,
+        }
+        .normalized();
+        let too_long = RecordingPreferences {
+            countdown_enabled: true,
+            countdown_seconds: 30,
+        }
+        .normalized();
+        assert_eq!(too_short.countdown_seconds, 1);
+        assert_eq!(too_long.countdown_seconds, 10);
+    }
 
     #[test]
     fn accepts_supported_persisted_frame_rate() {
@@ -2281,7 +2494,7 @@ mod tests {
         let normalized = normalize_loaded_output_config(config);
         let preview = normalized.preview.unwrap();
         assert_eq!(preview.format, OutputFormat::Webm);
-        assert_eq!(preview.fps, 15);
+        assert_eq!(preview.fps, 30);
         assert_eq!(
             preview.resolution,
             OutputResolution::FitWithin {
@@ -2306,6 +2519,29 @@ mod tests {
     }
 
     #[test]
+    fn preserves_a_supported_preview_frame_rate() {
+        let mut config = OutputConfig::default();
+        config.preview.as_mut().unwrap().fps = 24;
+
+        assert_eq!(
+            normalize_loaded_output_config(config).preview.unwrap().fps,
+            24
+        );
+    }
+
+    #[test]
+    fn preserves_animated_webp_and_disables_its_audio_track() {
+        let mut config = OutputConfig::default();
+        let preview = config.preview.as_mut().unwrap();
+        preview.format = OutputFormat::AnimatedWebp;
+        preview.include_audio = true;
+
+        let preview = normalize_loaded_output_config(config).preview.unwrap();
+        assert_eq!(preview.format, OutputFormat::AnimatedWebp);
+        assert!(!preview.include_audio);
+    }
+
+    #[test]
     fn restores_a_missing_preview_profile() {
         let config = OutputConfig {
             preview: None,
@@ -2313,6 +2549,19 @@ mod tests {
         };
 
         assert!(normalize_loaded_output_config(config).preview.is_some());
+    }
+
+    #[test]
+    fn preserves_an_explicitly_disabled_preview_and_cover_pair() {
+        let config = OutputConfig {
+            preview: None,
+            cover_enabled: false,
+            ..OutputConfig::default()
+        };
+
+        let normalized = normalize_loaded_output_config(config);
+        assert!(normalized.preview.is_none());
+        assert!(!normalized.cover_enabled);
     }
 
     #[test]

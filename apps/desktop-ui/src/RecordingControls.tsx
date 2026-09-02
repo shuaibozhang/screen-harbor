@@ -166,7 +166,7 @@ export function RecordingControls() {
   return (
     <main className="recording-controls-shell">
       <div className="recording-controls-bar">
-        <span className="recording-state"><i />{stopping ? "正在保存" : phase === "paused" ? "已暂停" : "录制中"}</span>
+        <span className="recording-state">{stopping ? "正在保存" : phase === "paused" ? "已暂停" : "录制中"}</span>
         <strong>{formatElapsed(stats?.elapsedMs ?? 0)}</strong>
         <small
           className={statusMessage ? `recording-controls-message${statusIsWarning ? " warning" : ""}` : undefined}

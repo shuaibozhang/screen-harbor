@@ -11,11 +11,16 @@ const developmentSnapshot: AppSnapshot = {
   outputSummary: "母版 MP4 · H.264/AAC · 原始分辨率 · 30 FPS · 系统声 / 预览 WebM · 最高 854×480 · 15 FPS",
   captureFps: 30,
   outputResolution: { mode: "native" },
+  previewEnabled: true,
   previewFormat: "webm",
   previewResolution: { mode: "fitWithin", width: 854, height: 480 },
+  previewFps: 15,
   supportedCaptureFps: [24, 30, 60],
+  supportedPreviewFps: [10, 15, 24, 30],
   monitorRefreshRateHz: 60,
   recommendedCaptureFps: 60,
+  countdownEnabled: false,
+  countdownSeconds: 3,
   recentRecordings: [],
   interruptedRecordings: [],
 };
@@ -39,13 +44,46 @@ export async function setOutputSettings(
   resolution: OutputResolution,
   previewFormat: OutputFormat,
   previewResolution: OutputResolution,
+  previewFps: number,
 ): Promise<void> {
-  if (isTauriRuntime()) await invoke("set_output_settings", { fps, resolution, previewFormat, previewResolution });
+  if (isTauriRuntime()) {
+    await invoke("set_output_settings", { fps, resolution, previewFormat, previewResolution, previewFps });
+    return;
+  }
+  developmentSnapshot.captureFps = fps;
+  developmentSnapshot.outputResolution = resolution;
+  developmentSnapshot.previewFormat = previewFormat;
+  developmentSnapshot.previewResolution = previewResolution;
+  developmentSnapshot.previewFps = previewFps;
 }
 
 export async function setAudioInput(
   source: "microphone" | "systemAudio",
   enabled: boolean,
 ): Promise<void> {
-  if (isTauriRuntime()) await invoke("set_audio_input", { source, enabled });
+  if (isTauriRuntime()) {
+    await invoke("set_audio_input", { source, enabled });
+    return;
+  }
+  developmentSnapshot[source].enabled = enabled;
+}
+
+export async function setPreviewEnabled(enabled: boolean): Promise<void> {
+  if (isTauriRuntime()) {
+    await invoke("set_preview_enabled", { enabled });
+    return;
+  }
+  developmentSnapshot.previewEnabled = enabled;
+}
+
+export async function setRecordingPreferences(
+  countdownEnabled: boolean,
+  countdownSeconds: number,
+): Promise<void> {
+  if (isTauriRuntime()) {
+    await invoke("set_recording_preferences", { countdownEnabled, countdownSeconds });
+    return;
+  }
+  developmentSnapshot.countdownEnabled = countdownEnabled;
+  developmentSnapshot.countdownSeconds = countdownSeconds;
 }

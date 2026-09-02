@@ -1,29 +1,16 @@
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
-  AlertTriangle,
-  ChevronRight,
-  Clock3,
-  Folder,
-  FolderOpen,
-  Mic2,
   MonitorSpeaker,
-  Search,
-  Settings2,
   Trash2,
-  Video,
   X,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { isTauriRuntime } from "./bridge";
-import { RecordingResult } from "./RecordingResult";
+import { HomeScreen } from "./HomeScreen";
 import { useAppStore } from "./store";
-import type { DisplayChangeEvent, FinalizationEvent, InterruptedRecording, OutputFormat, OutputResolution, OutputStatus, RecordingDetails, RecordingState } from "./domain";
+import type { DisplayChangeEvent, FinalizationEvent, InterruptedRecording, OutputFormat, OutputResolution, RecordingState } from "./domain";
 import "./styles.css";
-
-function StatusDot({ available }: { available: boolean }) {
-  return <span className={available ? "status-dot ready" : "status-dot"} aria-hidden="true" />;
-}
 
 type ResolutionChoice = "native" | "1080p" | "720p" | "custom";
 type PreviewResolutionChoice = "480p" | "360p" | "240p" | "custom";
@@ -71,21 +58,8 @@ function sameResolution(left: OutputResolution, right: OutputResolution) {
     ));
 }
 
-function formatAvailableSpace(bytes?: number) {
-  if (bytes === undefined) return "可用空间暂时不可读取";
-  const gibibytes = bytes / (1024 ** 3);
-  return `可用 ${gibibytes >= 10 ? gibibytes.toFixed(0) : gibibytes.toFixed(1)} GB`;
-}
-
-function formatFileSize(bytes: number) {
-  const mebibytes = bytes / (1024 ** 2);
-  return mebibytes >= 1024
-    ? `${(mebibytes / 1024).toFixed(1)} GB`
-    : `${Math.max(mebibytes, 0.1).toFixed(1)} MB`;
-}
-
 export function App() {
-  const { snapshot, loading, error, hydrate, startSelection, updateOutputSettings, updateAudioInput, updateSaveDirectory } = useAppStore();
+  const { snapshot, loading, error, hydrate, startSelection, updateOutputSettings, updateAudioInput, updatePreviewEnabled, updateRecordingPreferences, updateSaveDirectory } = useAppStore();
   const [finalizationError, setFinalizationError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [draftFps, setDraftFps] = useState(30);
@@ -94,16 +68,16 @@ export function App() {
   const [customHeight, setCustomHeight] = useState(1080);
   const [draftPreviewFormat, setDraftPreviewFormat] = useState<OutputFormat>("mp4");
   const [draftPreviewResolution, setDraftPreviewResolution] = useState<PreviewResolutionChoice>("480p");
+  const [draftPreviewFps, setDraftPreviewFps] = useState(15);
   const [customPreviewWidth, setCustomPreviewWidth] = useState(854);
   const [customPreviewHeight, setCustomPreviewHeight] = useState(480);
+  const [draftCountdownEnabled, setDraftCountdownEnabled] = useState(false);
+  const [draftCountdownSeconds, setDraftCountdownSeconds] = useState(3);
   const [savingSettings, setSavingSettings] = useState(false);
   const [savingAudio, setSavingAudio] = useState<"microphone" | "systemAudio" | null>(null);
+  const [savingPreview, setSavingPreview] = useState(false);
   const [showAllRecordings, setShowAllRecordings] = useState(false);
   const [openingRecording, setOpeningRecording] = useState<string | null>(null);
-  const [retryingPreview, setRetryingPreview] = useState<string | null>(null);
-  const [retryingCover, setRetryingCover] = useState<string | null>(null);
-  const [selectedRecordingId, setSelectedRecordingId] = useState<string | null>(null);
-  const [recordingDetails, setRecordingDetails] = useState<RecordingDetails | null>(null);
   const [recordingQuery, setRecordingQuery] = useState("");
   const [selectedRecordingIds, setSelectedRecordingIds] = useState<Set<string>>(new Set());
   const [deleteConfirmation, setDeleteConfirmation] = useState<{ ids: string[]; names: string[] } | null>(null);
@@ -134,14 +108,6 @@ export function App() {
         setFinalizationError(event.payload.error ?? "录制文件保存失败。");
       } else {
         setFinalizationError(null);
-        if (event.payload.recordingId) {
-          setSelectedRecordingId(event.payload.recordingId);
-          void invoke<RecordingDetails>("get_recording_details", {
-            recordingId: event.payload.recordingId,
-          }).then(setRecordingDetails).catch((detailsError) => {
-            setFinalizationError(String(detailsError));
-          });
-        }
       }
       void hydrate();
     }).then((dispose) => {
@@ -150,13 +116,6 @@ export function App() {
     });
     void listen("recording://library-changed", () => {
       void hydrate();
-      if (selectedRecordingId) {
-        void invoke<RecordingDetails>("get_recording_details", {
-          recordingId: selectedRecordingId,
-        }).then(setRecordingDetails).catch((detailsError) => {
-          setFinalizationError(String(detailsError));
-        });
-      }
     }).then((dispose) => {
       if (disposed) dispose();
       else unlistenLibrary = dispose;
@@ -185,7 +144,7 @@ export function App() {
       unlistenDisplays?.();
       unlistenShortcutError?.();
     };
-  }, [hydrate, selectedRecordingId]);
+  }, [hydrate]);
 
   if (loading) {
     return <main className="shell loading">正在准备 FrameFlow…</main>;
@@ -212,12 +171,15 @@ export function App() {
       setCustomHeight(snapshot.outputResolution.height);
     }
     setDraftPreviewFormat(snapshot.previewFormat);
+    setDraftPreviewFps(snapshot.previewFps);
     const previewChoice = previewResolutionChoice(snapshot.previewResolution);
     setDraftPreviewResolution(previewChoice);
     if (snapshot.previewResolution.mode === "fitWithin" && previewChoice === "custom") {
       setCustomPreviewWidth(snapshot.previewResolution.width);
       setCustomPreviewHeight(snapshot.previewResolution.height);
     }
+    setDraftCountdownEnabled(snapshot.countdownEnabled);
+    setDraftCountdownSeconds(snapshot.countdownSeconds);
     setSettingsOpen(true);
   };
 
@@ -240,7 +202,9 @@ export function App() {
         outputResolution(draftResolution, customWidth, customHeight),
         draftPreviewFormat,
         previewResolution(draftPreviewResolution, customPreviewWidth, customPreviewHeight),
+        draftPreviewFps,
       );
+      await updateRecordingPreferences(draftCountdownEnabled, draftCountdownSeconds);
       setSettingsOpen(false);
     } catch {
       // The store exposes the backend error in the main alert.
@@ -261,7 +225,10 @@ export function App() {
   const settingsUnchanged = draftFps === snapshot.captureFps
     && sameResolution(draftOutputResolution, snapshot.outputResolution)
     && draftPreviewFormat === snapshot.previewFormat
-    && sameResolution(draftPreviewOutputResolution, snapshot.previewResolution);
+    && sameResolution(draftPreviewOutputResolution, snapshot.previewResolution)
+    && draftPreviewFps === snapshot.previewFps
+    && draftCountdownEnabled === snapshot.countdownEnabled
+    && draftCountdownSeconds === snapshot.countdownSeconds;
 
   const toggleAudio = async (source: "microphone" | "systemAudio", enabled: boolean) => {
     setSavingAudio(source);
@@ -269,6 +236,15 @@ export function App() {
       await updateAudioInput(source, enabled);
     } finally {
       setSavingAudio(null);
+    }
+  };
+
+  const togglePreview = async (enabled: boolean) => {
+    setSavingPreview(true);
+    try {
+      await updatePreviewEnabled(enabled);
+    } finally {
+      setSavingPreview(false);
     }
   };
 
@@ -284,58 +260,6 @@ export function App() {
       setOpeningRecording(null);
     }
   };
-
-  const retryPreview = async (recordingId: string) => {
-    setRetryingPreview(recordingId);
-    try {
-      await invoke("retry_preview", { recordingId });
-      setFinalizationError(null);
-      await hydrate();
-      if (selectedRecordingId === recordingId) {
-        setRecordingDetails(await invoke<RecordingDetails>("get_recording_details", { recordingId }));
-      }
-    } catch (previewError) {
-      setFinalizationError(String(previewError));
-      await hydrate();
-    } finally {
-      setRetryingPreview(null);
-    }
-  };
-
-  const retryCover = async (recordingId: string) => {
-    setRetryingCover(recordingId);
-    try {
-      await invoke("retry_cover", { recordingId });
-      setFinalizationError(null);
-      await hydrate();
-      if (selectedRecordingId === recordingId) {
-        setRecordingDetails(await invoke<RecordingDetails>("get_recording_details", { recordingId }));
-      }
-    } catch (coverError) {
-      setFinalizationError(String(coverError));
-      await hydrate();
-    } finally {
-      setRetryingCover(null);
-    }
-  };
-
-  const previewLabel = (status: OutputStatus) => {
-    if (status === "completed") return "轻量预览已生成";
-    if (status === "processing") return "正在生成轻量预览";
-    if (status === "failed") return "轻量预览生成失败";
-    if (status === "pending") return "轻量预览等待处理";
-    return "仅高清母版";
-  };
-
-  const normalizedQuery = recordingQuery.trim().toLocaleLowerCase();
-  const filteredRecordings = normalizedQuery
-    ? snapshot.recentRecordings.filter((recording) => recording.name.toLocaleLowerCase().includes(normalizedQuery))
-    : snapshot.recentRecordings;
-  const visibleRecordings = showAllRecordings || normalizedQuery
-    ? filteredRecordings
-    : filteredRecordings.slice(0, 3);
-  const allVisibleSelected = visibleRecordings.length > 0
-    && visibleRecordings.every((recording) => selectedRecordingIds.has(recording.id));
 
   const toggleRecordingSelection = (recordingId: string) => {
     setSelectedRecordingIds((current) => {
@@ -402,200 +326,42 @@ export function App() {
     }
   };
 
-  const openRecordingResult = async (recordingId: string) => {
-    setSelectedRecordingId(recordingId);
-    setRecordingDetails(null);
-    try {
-      setRecordingDetails(await invoke<RecordingDetails>("get_recording_details", { recordingId }));
-      setFinalizationError(null);
-    } catch (detailsError) {
-      setSelectedRecordingId(null);
-      setFinalizationError(String(detailsError));
-    }
-  };
-
-  if (selectedRecordingId) {
-    if (!recordingDetails) {
-      return <main className="shell loading">正在读取录制结果…</main>;
-    }
-    return (
-      <RecordingResult
-        details={recordingDetails}
-        retrying={retryingPreview === selectedRecordingId}
-        retryingCover={retryingCover === selectedRecordingId}
-        onBack={() => {
-          setSelectedRecordingId(null);
-          setRecordingDetails(null);
-          void hydrate();
-        }}
-        onOpenLocation={() => void openRecordingLocation(selectedRecordingId)}
-        onRetryPreview={() => void retryPreview(selectedRecordingId)}
-        onRetryCover={() => void retryCover(selectedRecordingId)}
-      />
-    );
-  }
-
   return (
-    <main className="shell">
-      <header className="titlebar">
-        <div className="brand"><span className="brand-mark" />FrameFlow</div>
-        <button className="icon-button" aria-label="打开设置" onClick={openSettings}><Settings2 size={18} /></button>
-      </header>
-
-      <div className="content">
-        {(error || finalizationError) && (
-          <div className="error" role="alert">{error ?? finalizationError}</div>
-        )}
-
-        <section className="hero" aria-labelledby="hero-title">
-          <div>
-            <p className="eyebrow">准备就绪</p>
-            <h1 id="hero-title">录下重点，同时获得两个版本</h1>
-            <p>轻量版快速分享，高清版安心留存。</p>
-          </div>
-          <div className="start-area">
-            <div className="start-control">
-              <button className="start-button" onClick={() => void startSelection()}>
-                <span className="record-dot" />开始录屏
-              </button>
-            </div>
-            <small>
-              {snapshot.globalShortcutAvailable
-                ? "开始后在任意屏幕框选 · Alt + Shift + R"
-                : "开始后在任意屏幕框选 · 快捷键被其他应用占用"}
-            </small>
-          </div>
-        </section>
-
-        <section className="section" aria-labelledby="save-heading">
-          <div className="section-heading">
-            <h2 id="save-heading">保存位置</h2>
-            <button
-              disabled={changingSaveDirectory || snapshot.recordingState !== "idle"}
-              onClick={() => void changeSaveDirectory()}
-            >
-              {changingSaveDirectory ? "选择中…" : "更改"}
-            </button>
-          </div>
-          <button
-            className="row path-row"
-            disabled={changingSaveDirectory || snapshot.recordingState !== "idle"}
-            onClick={() => void changeSaveDirectory()}
-            title={snapshot.saveDirectory}
-          >
-            <span className="row-icon"><Folder size={19} /></span>
-            <span className="row-copy">
-              <strong>{snapshot.saveDirectory}</strong>
-              <small>{formatAvailableSpace(snapshot.saveDirectoryAvailableBytes)} · 切换不会移动或隐藏旧录像</small>
-            </span>
-            <ChevronRight size={18} />
-          </button>
-        </section>
-
-        <section className="section" aria-labelledby="input-heading">
-          <div className="section-heading"><h2 id="input-heading">录制输入</h2></div>
-          <div className="rows">
-            <div className="row">
-              <span className="row-icon"><Mic2 size={19} /></span>
-              <span className="row-copy"><strong>麦克风</strong><small><StatusDot available={snapshot.microphone.available} />{snapshot.microphone.deviceName ?? "未找到可用麦克风"}</small></span>
-              <button className={`input-toggle ${snapshot.microphone.enabled ? "enabled" : ""}`} type="button" role="switch" aria-checked={snapshot.microphone.enabled} aria-label="录制麦克风" disabled={!snapshot.microphone.available || savingAudio !== null} onClick={() => void toggleAudio("microphone", !snapshot.microphone.enabled)}><span /></button>
-            </div>
-            <div className="row">
-              <span className="row-icon"><MonitorSpeaker size={19} /></span>
-              <span className="row-copy"><strong>系统声音</strong><small><StatusDot available={snapshot.systemAudio.available} />{snapshot.systemAudio.deviceName ?? "未找到可用输出设备"}</small></span>
-              <button className={`input-toggle ${snapshot.systemAudio.enabled ? "enabled" : ""}`} type="button" role="switch" aria-checked={snapshot.systemAudio.enabled} aria-label="录制系统声音" disabled={!snapshot.systemAudio.available || savingAudio !== null} onClick={() => void toggleAudio("systemAudio", !snapshot.systemAudio.enabled)}><span /></button>
-            </div>
-          </div>
-        </section>
-
-        <section className="section output" aria-labelledby="output-heading">
-          <div className="section-heading"><h2 id="output-heading">输出</h2><button onClick={openSettings}>调整</button></div>
-          <div className="row">
-            <span className="row-icon"><Video size={19} /></span>
-            <span className="row-copy"><strong>高清母版与轻量预览</strong><small>{snapshot.outputSummary}</small></span>
-          </div>
-        </section>
-
-        {snapshot.interruptedRecordings.length > 0 && (
-          <section className="section interrupted" aria-labelledby="interrupted-heading">
-            <div className="section-heading"><h2 id="interrupted-heading">未完成录制</h2></div>
-            <div className="interrupted-notice">
-              <AlertTriangle size={17} />
-              <span>以下文件来自异常退出，未形成可播放的完整 MP4。FrameFlow 已原样保留。</span>
-            </div>
-            <div className="rows">
-              {snapshot.interruptedRecordings.map((recording) => (
-                <div className="row" key={recording.id}>
-                  <span className="row-icon interrupted-icon"><AlertTriangle size={18} /></span>
-                  <span className="row-copy">
-                    <strong>{recording.name}</strong>
-                    <small>{recording.createdLabel} · 已保留 {formatFileSize(recording.fileSizeBytes)}</small>
-                  </span>
-                  <button className="recording-location" type="button" onClick={() => void openInterruptedLocation(recording.id)}>
-                    <FolderOpen size={14} />打开位置
-                  </button>
-                  <button className="recording-delete" type="button" aria-label={`删除未完成录制 ${recording.name}`} onClick={() => setInterruptedDeleteConfirmation(recording)}>
-                    <Trash2 size={15} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          </section>
-        )}
-
-        <section className="section recent" aria-labelledby="recent-heading">
-          <div className="section-heading"><h2 id="recent-heading">录制库</h2>{snapshot.recentRecordings.length > 3 && !normalizedQuery && <button onClick={() => setShowAllRecordings((visible) => !visible)}>{showAllRecordings ? "收起" : "查看全部"}</button>}</div>
-          {snapshot.recentRecordings.length > 0 && (
-            <div className="library-tools">
-              <label className="library-search">
-                <Search size={15} />
-                <input value={recordingQuery} onChange={(event) => setRecordingQuery(event.target.value)} placeholder="搜索录制名称" aria-label="搜索录制名称" />
-              </label>
-              <button className="library-select-all" type="button" onClick={() => {
-                setSelectedRecordingIds((current) => {
-                  const next = new Set(current);
-                  visibleRecordings.forEach((recording) => {
-                    if (allVisibleSelected) next.delete(recording.id);
-                    else next.add(recording.id);
-                  });
-                  return next;
-                });
-              }}>{allVisibleSelected ? "取消全选" : "全选当前"}</button>
-              {selectedRecordingIds.size > 0 && (
-                <button className="library-delete-selected" type="button" onClick={() => requestRecordingDeletion([...selectedRecordingIds])}>
-                  <Trash2 size={14} />移入回收站（{selectedRecordingIds.size}）
-                </button>
-              )}
-            </div>
-          )}
-          {snapshot.recentRecordings.length === 0 ? (
-            <div className="empty"><Clock3 size={20} /><span><strong>还没有录制</strong><small>完成的内容会出现在这里</small></span></div>
-          ) : visibleRecordings.length === 0 ? (
-            <div className="empty"><Search size={20} /><span><strong>没有匹配的录制</strong><small>换一个名称关键词试试</small></span></div>
-          ) : (
-            <div className={`rows recent-list ${showAllRecordings || normalizedQuery ? "expanded" : ""}`}>
-              {visibleRecordings.map((recording) => (
-                <div className="row" key={recording.id}>
-                  <input className="recording-select" type="checkbox" aria-label={`选择 ${recording.name}`} checked={selectedRecordingIds.has(recording.id)} onChange={() => toggleRecordingSelection(recording.id)} />
-                  <span className="recording-thumbnail">
-                    {recording.coverStatus === "completed" && recording.coverPath
-                      ? <img src={convertFileSrc(recording.coverPath)} alt="" />
-                      : <Video size={19} />}
-                  </span>
-                  <span className="row-copy">
-                    <strong>{recording.name}</strong>
-                    <small>{recording.createdLabel} · {recording.durationSeconds !== undefined ? `${recording.durationSeconds} 秒` : "时长未知"} · {previewLabel(recording.previewStatus)}</small>
-                  </span>
-                  {recording.previewStatus === "failed" && <button className="recording-location" disabled={openingRecording !== null || retryingPreview !== null} onClick={() => void retryPreview(recording.id)}>{retryingPreview === recording.id ? "重试中…" : "重试预览"}</button>}
-                  {recording.coverStatus === "failed" && <button className="recording-location" disabled={openingRecording !== null || retryingCover !== null} onClick={() => void retryCover(recording.id)}>{retryingCover === recording.id ? "重试中…" : "重试封面"}</button>}
-                  <button className="recording-location" disabled={openingRecording !== null || retryingPreview !== null} onClick={() => void openRecordingResult(recording.id)}>查看</button>
-                  <button className="recording-delete" aria-label={`删除 ${recording.name}`} disabled={deletingRecordings} onClick={() => requestRecordingDeletion([recording.id])}><Trash2 size={15} /></button>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-      </div>
+    <>
+      <HomeScreen
+        snapshot={snapshot}
+        alert={error ?? finalizationError}
+        savingAudio={savingAudio}
+        savingPreview={savingPreview}
+        changingSaveDirectory={changingSaveDirectory}
+        showAllRecordings={showAllRecordings}
+        recordingQuery={recordingQuery}
+        selectedRecordingIds={selectedRecordingIds}
+        openingRecording={openingRecording}
+        deletingRecordings={deletingRecordings}
+        onOpenSettings={openSettings}
+        onStartSelection={() => void startSelection()}
+        onChangeSaveDirectory={() => void changeSaveDirectory()}
+        onToggleAudio={(source, enabled) => void toggleAudio(source, enabled)}
+        onTogglePreview={(enabled) => void togglePreview(enabled)}
+        onShowAllRecordings={setShowAllRecordings}
+        onRecordingQueryChange={setRecordingQuery}
+        onToggleRecordingSelection={toggleRecordingSelection}
+        onSetVisibleSelection={(recordingIds, selected) => {
+          setSelectedRecordingIds((current) => {
+            const next = new Set(current);
+            recordingIds.forEach((recordingId) => {
+              if (selected) next.add(recordingId);
+              else next.delete(recordingId);
+            });
+            return next;
+          });
+        }}
+        onRequestRecordingDeletion={requestRecordingDeletion}
+        onOpenRecordingLocation={(recordingId) => void openRecordingLocation(recordingId)}
+        onOpenInterruptedLocation={(recordingId) => void openInterruptedLocation(recordingId)}
+        onRequestInterruptedDeletion={setInterruptedDeleteConfirmation}
+      />
       {deleteConfirmation && (
         <div className="settings-backdrop" role="presentation" onMouseDown={(event) => {
           if (event.target === event.currentTarget && !deletingRecordings) setDeleteConfirmation(null);
@@ -632,10 +398,40 @@ export function App() {
         }}>
           <section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
             <header>
-              <div><p>输出设置</p><h2 id="settings-title">视频</h2></div>
+              <div><p>录制设置</p><h2 id="settings-title">视频</h2></div>
               <button className="icon-button" aria-label="关闭设置" disabled={savingSettings} onClick={() => setSettingsOpen(false)}><X size={18} /></button>
             </header>
             <p className="settings-help">原始分辨率保留选区的全部物理像素；缩放输出只在编码阶段生效，不改变选区范围。</p>
+            <div className="setting-group countdown-settings">
+              <div className="countdown-setting-head">
+                <span>
+                  <h3>开始倒计时</h3>
+                  <small>关闭后，确认选区会立即开始录制</small>
+                </span>
+                <button
+                  className={`settings-switch${draftCountdownEnabled ? " enabled" : ""}`}
+                  type="button"
+                  role="switch"
+                  aria-checked={draftCountdownEnabled}
+                  aria-label="录制开始倒计时"
+                  onClick={() => setDraftCountdownEnabled((enabled) => !enabled)}
+                ><span /></button>
+              </div>
+              {draftCountdownEnabled && (
+                <div className="countdown-options" role="radiogroup" aria-label="倒计时秒数">
+                  {[3, 5, 10].map((seconds) => (
+                    <button
+                      key={seconds}
+                      type="button"
+                      role="radio"
+                      aria-checked={draftCountdownSeconds === seconds}
+                      className={draftCountdownSeconds === seconds ? "selected" : ""}
+                      onClick={() => setDraftCountdownSeconds(seconds)}
+                    >{seconds} 秒</button>
+                  ))}
+                </div>
+              )}
+            </div>
             <div className="setting-group">
               <h3>输出分辨率</h3>
               <div className="resolution-options" role="radiogroup" aria-label="输出分辨率">
@@ -684,7 +480,10 @@ export function App() {
                   role="radio"
                   aria-checked={draftFps === fps}
                   className={draftFps === fps ? "fps-option selected" : "fps-option"}
-                  onClick={() => setDraftFps(fps)}
+                  onClick={() => {
+                    setDraftFps(fps);
+                    if (draftPreviewFps > fps) setDraftPreviewFps(fps);
+                  }}
                 >
                   <strong>{fps} FPS</strong>
                   <small>{fps === snapshot.recommendedCaptureFps ? "当前屏幕推荐" : fps === 24 ? "较小文件" : fps === 30 ? "通用流畅" : "高流畅度"}</small>
@@ -701,6 +500,7 @@ export function App() {
                 {([
                   ["mp4", "MP4", "H.264 + AAC，兼容性最好"],
                   ["webm", "WebM", "VP9 + Opus，通常文件更小"],
+                  ["animated_webp", "WebP", "动态图片，无音频"],
                 ] as const).map(([value, label, description]) => (
                   <button
                     key={value}
@@ -743,6 +543,19 @@ export function App() {
                   <label>最大高度<input type="number" min="2" max="2160" step="2" value={customPreviewHeight} onChange={(event) => setCustomPreviewHeight(Number.isFinite(event.currentTarget.valueAsNumber) ? event.currentTarget.valueAsNumber : 0)} /></label>
                 </div>
               )}
+              <h3 className="preview-resolution-heading">轻量预览帧率</h3>
+              <div className="preview-fps-options" role="radiogroup" aria-label="轻量预览帧率">
+                {snapshot.supportedPreviewFps.filter((fps) => fps <= draftFps).map((fps) => (
+                  <button
+                    key={fps}
+                    type="button"
+                    role="radio"
+                    aria-checked={draftPreviewFps === fps}
+                    className={draftPreviewFps === fps ? "selected" : ""}
+                    onClick={() => setDraftPreviewFps(fps)}
+                  >{fps} FPS</button>
+                ))}
+              </div>
               <p className="preview-settings-note">设置仅应用于之后完成的录制；每个录制组会保存自己的预览配置，重试时不会被后来修改的设置覆盖。</p>
             </div>
             <p className="third-party-notice">FrameFlow 使用 FFmpeg 项目的独立运行时处理预览与封面，该运行时依据 LGPLv3 或更高版本分发；许可证、对应源码和构建配方随安装包提供。</p>
@@ -755,6 +568,6 @@ export function App() {
           </section>
         </div>
       )}
-    </main>
+    </>
   );
 }

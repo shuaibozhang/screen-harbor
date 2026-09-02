@@ -11,7 +11,7 @@ export type RecordingState =
   | "failed";
 
 export type OutputStatus = "not_requested" | "pending" | "processing" | "completed" | "failed";
-export type OutputFormat = "mp4" | "webm";
+export type OutputFormat = "mp4" | "webm" | "animated_webp";
 
 export interface RecentRecording {
   id: string;
@@ -62,11 +62,16 @@ export interface AppSnapshot {
   outputSummary: string;
   captureFps: number;
   outputResolution: OutputResolution;
+  previewEnabled: boolean;
   previewFormat: OutputFormat;
   previewResolution: OutputResolution;
+  previewFps: number;
   supportedCaptureFps: number[];
+  supportedPreviewFps: number[];
   monitorRefreshRateHz?: number;
   recommendedCaptureFps: number;
+  countdownEnabled: boolean;
+  countdownSeconds: number;
   recentRecordings: RecentRecording[];
   interruptedRecordings: InterruptedRecording[];
 }
@@ -83,6 +88,11 @@ export interface RegionSelection {
   displayId: string;
   desktopRect: { x: number; y: number; width: number; height: number };
   captureRect: { x: number; y: number; width: number; height: number };
+}
+
+export interface RecordingPreferences {
+  countdownEnabled: boolean;
+  countdownSeconds: number;
 }
 
 export interface CaptureStats {

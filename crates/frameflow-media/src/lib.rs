@@ -9,13 +9,14 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-const MEDIA_WORKER_PROTOCOL_VERSION: u16 = 3;
+const MEDIA_WORKER_PROTOCOL_VERSION: u16 = 4;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PreviewFormat {
     Mp4,
     Webm,
+    AnimatedWebp,
 }
 
 impl PreviewFormat {
@@ -23,6 +24,7 @@ impl PreviewFormat {
         match self {
             Self::Mp4 => "mp4",
             Self::Webm => "webm",
+            Self::AnimatedWebp => "webp",
         }
     }
 }
@@ -394,7 +396,8 @@ fn ffmpeg_arguments(job: &PreviewJob) -> Vec<OsString> {
         "-map".into(),
         "0:v:0".into(),
     ];
-    if job.include_audio {
+    let include_audio = job.include_audio && job.format != PreviewFormat::AnimatedWebp;
+    if include_audio {
         arguments.extend(["-map".into(), "0:a:0?".into()]);
     } else {
         arguments.push("-an".into());
@@ -419,7 +422,7 @@ fn ffmpeg_arguments(job: &PreviewJob) -> Vec<OsString> {
                 "-pix_fmt".into(),
                 "yuv420p".into(),
             ]);
-            if job.include_audio {
+            if include_audio {
                 arguments.extend(["-c:a".into(), "aac_mf".into(), "-b:a".into(), "96k".into()]);
             }
             arguments.extend([
@@ -444,10 +447,26 @@ fn ffmpeg_arguments(job: &PreviewJob) -> Vec<OsString> {
                 "-pix_fmt".into(),
                 "yuv420p".into(),
             ]);
-            if job.include_audio {
+            if include_audio {
                 arguments.extend(["-c:a".into(), "libopus".into(), "-b:a".into(), "96k".into()]);
             }
             arguments.extend(["-f".into(), "webm".into()]);
+        }
+        PreviewFormat::AnimatedWebp => {
+            arguments.extend([
+                "-c:v".into(),
+                "libwebp_anim".into(),
+                "-lossless".into(),
+                "0".into(),
+                "-compression_level".into(),
+                "4".into(),
+                "-q:v".into(),
+                "65".into(),
+                "-loop".into(),
+                "0".into(),
+                "-f".into(),
+                "webp".into(),
+            ]);
         }
     }
     arguments.push(job.temporary_path.as_os_str().to_owned());
@@ -635,6 +654,33 @@ mod tests {
             .any(|pair| pair == ["-c:v", "libvpx-vp9"]));
         assert!(arguments.windows(2).any(|pair| pair == ["-c:a", "libopus"]));
         assert!(arguments.windows(2).any(|pair| pair == ["-f", "webm"]));
+    }
+
+    #[test]
+    fn animated_webp_preview_uses_webp_anim_without_audio() {
+        let job = PreviewJob {
+            input_path: "main.mp4".into(),
+            temporary_path: "preview.webp.part".into(),
+            output_path: "preview.webp".into(),
+            format: PreviewFormat::AnimatedWebp,
+            maximum_width: 640,
+            maximum_height: 360,
+            frames_per_second: 10,
+            include_audio: true,
+        };
+        let arguments = ffmpeg_arguments(&job)
+            .into_iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(arguments
+            .windows(2)
+            .any(|pair| pair == ["-c:v", "libwebp_anim"]));
+        assert!(!arguments.iter().any(|argument| argument == "0:a:0?"));
+        assert!(arguments.windows(2).any(|pair| pair == ["-f", "webp"]));
+        assert_eq!(
+            arguments.last().map(String::as_str),
+            Some("preview.webp.part")
+        );
     }
 
     #[test]
