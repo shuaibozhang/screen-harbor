@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="280" viewBox="0 0 1400 280" role="img" aria-labelledby="title desc">
+  <title id="title">ScreenHarbor</title>
+  <desc id="desc">ScreenHarbor primary logo in the application sage and recording brick palette.</desc>
+
+  <g transform="translate(24 22)">
+    <path fill="#566a5d" d="M34 56c0-10 6-20 15-25L139 2c11-5 23-5 34 1l50 25c9 5 9 13 0 18L112 103c-10 5-22 5-32 0L49 87C40 82 34 70 34 56Z"/>
+    <path fill="#b65b54" d="M24 178c0-8 5-16 13-21l112-64c10-6 23-6 33 0l40 23c12 7 12 18 0 25L106 216c-10 7-23 7-34 1l-35-20c-8-5-13-11-13-19Z"/>
+  </g>
+
+  <text x="286" y="194" font-family="Inter, 'Arial Rounded MT Bold', 'Segoe UI', sans-serif" font-size="150" font-weight="760" letter-spacing="-7">
+    <tspan fill="#566a5d">Screen</tspan><tspan fill="#b65b54">Harbor</tspan>
+  </text>
+</svg>

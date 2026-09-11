@@ -3,7 +3,7 @@ import type { AppSnapshot, OutputFormat, OutputResolution } from "./domain";
 
 const developmentSnapshot: AppSnapshot = {
   recordingState: "idle",
-  saveDirectory: "D:\\FrameFlow\\Recordings",
+  saveDirectory: "D:\\ScreenHarbor\\Recordings",
   saveDirectoryAvailableBytes: 128 * 1024 * 1024 * 1024,
   globalShortcutAvailable: true,
   microphone: {

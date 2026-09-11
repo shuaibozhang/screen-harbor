@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "FrameFlow",
-  "version": "0.1.1",
-  "identifier": "com.frameflow.desktop",
+  "productName": "ScreenHarbor",
+  "version": "0.2.0-beta.1",
+  "identifier": "com.screenharbor.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "FrameFlow",
+        "title": "ScreenHarbor",
         "width": 680,
         "height": 920,
         "minWidth": 600,
@@ -24,7 +24,7 @@
       },
       {
         "label": "selection",
-        "title": "FrameFlow 选区控制",
+        "title": "ScreenHarbor 选区控制",
         "url": "index.html?window=selection-controls",
         "width": 520,
         "height": 56,
@@ -38,7 +38,7 @@
       },
       {
         "label": "recording-controls",
-        "title": "FrameFlow 录制控制",
+        "title": "ScreenHarbor 录制控制",
         "url": "index.html?window=recording-controls",
         "width": 680,
         "height": 56,
@@ -55,7 +55,7 @@
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": ["$VIDEO/FrameFlow/**"]
+        "scope": ["$VIDEO/ScreenHarbor/**", "$VIDEO/FrameFlow/**"]
       }
     }
   },
@@ -64,7 +64,7 @@
     "targets": [
       "nsis"
     ],
-    "shortDescription": "FrameFlow Windows screen recorder",
+    "shortDescription": "ScreenHarbor Windows screen recorder",
     "longDescription": "A lightweight Windows screen recorder focused on clear capture controls and reliable local output.",
     "resources": {
       "resources/ffmpeg/": "ffmpeg/"

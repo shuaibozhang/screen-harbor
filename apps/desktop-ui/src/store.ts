@@ -1,6 +1,9 @@
 import { create } from "zustand";
 import { beginSelection, chooseSaveDirectory, getAppSnapshot, setAudioInput, setOutputSettings, setPreviewEnabled, setRecordingPreferences } from "./bridge";
 import type { AppSnapshot, OutputFormat, OutputResolution } from "./domain";
+import { currentLocale, translate } from "./i18n";
+
+const t = (source: string, values?: Record<string, string | number>) => translate(currentLocale(), source, values);
 
 interface AppStore {
   snapshot: AppSnapshot | null;
@@ -26,14 +29,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
     try {
       set({ snapshot: await getAppSnapshot(), loading: false });
     } catch {
-      set({ error: "无法读取应用状态，请重新启动 FrameFlow。", loading: false });
+      set({ error: t("无法读取应用状态，请重新启动 ScreenHarbor。"), loading: false });
     }
   },
   startSelection: async () => {
     try {
       await beginSelection();
     } catch {
-      set({ error: "暂时无法进入框选，请稍后重试。" });
+      set({ error: t("暂时无法进入框选，请稍后重试。") });
     }
   },
   updateOutputSettings: async (fps, resolution, previewFormat, previewResolution, previewFps) => {
@@ -41,7 +44,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       await setOutputSettings(fps, resolution, previewFormat, previewResolution, previewFps);
       set({ snapshot: await getAppSnapshot(), error: null });
     } catch (cause) {
-      set({ error: `无法保存输出设置：${String(cause)}` });
+      set({ error: t("无法保存输出设置：{error}", { error: String(cause) }) });
       throw cause;
     }
   },
@@ -50,7 +53,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       await setAudioInput(source, enabled, deviceId);
       set({ snapshot: await getAppSnapshot(), error: null });
     } catch (cause) {
-      set({ error: `无法更新音频输入：${String(cause)}` });
+      set({ error: t("无法更新音频输入：{error}", { error: String(cause) }) });
       throw cause;
     }
   },
@@ -59,7 +62,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       await setPreviewEnabled(enabled);
       set({ snapshot: await getAppSnapshot(), error: null });
     } catch (cause) {
-      set({ error: `无法更新轻量预览：${String(cause)}` });
+      set({ error: t("无法更新轻量预览：{error}", { error: String(cause) }) });
       throw cause;
     }
   },
@@ -68,7 +71,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       await setRecordingPreferences(countdownEnabled, countdownSeconds);
       set({ snapshot: await getAppSnapshot(), error: null });
     } catch (cause) {
-      set({ error: `无法更新录制倒计时：${String(cause)}` });
+      set({ error: t("无法更新录制倒计时：{error}", { error: String(cause) }) });
       throw cause;
     }
   },
@@ -79,7 +82,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       set({ snapshot: await getAppSnapshot(), error: null });
       return true;
     } catch (cause) {
-      set({ error: `无法更改保存位置：${String(cause)}` });
+      set({ error: t("无法更改保存位置：{error}", { error: String(cause) }) });
       throw cause;
     }
   },

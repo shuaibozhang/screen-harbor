@@ -1,6 +1,6 @@
 # FFmpeg runtime notice
 
-FrameFlow distributes an unmodified FFmpeg command-line runtime as a separate process. FrameFlow does not link its proprietary/Rust code to FFmpeg libraries.
+ScreenHarbor distributes an unmodified FFmpeg command-line runtime as a separate process. ScreenHarbor does not link its Rust code to FFmpeg libraries.
 
 The packaged runtime is the BtbN `win64-lgpl-shared-9.0` build from release `autobuild-2026-08-29-13-12`:
 

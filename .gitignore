@@ -12,6 +12,7 @@ test-results/
 
 # Rust / Tauri build output
 target/
+/release/
 .codex-target/
 src-tauri/gen/
 

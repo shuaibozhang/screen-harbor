@@ -3,9 +3,11 @@ import { listen } from "@tauri-apps/api/event";
 import { Play, RotateCcw, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { RecordingPreferences, RecordingState, RegionSelection } from "./domain";
+import { useI18n } from "./i18n";
 import "./selection-controls.css";
 
 export function SelectionControls() {
+  const { t } = useI18n();
   const [selection, setSelection] = useState<RegionSelection | null>(null);
   const [phase, setPhase] = useState<RecordingState>("idle");
   const [countdown, setCountdown] = useState(3);
@@ -85,13 +87,13 @@ export function SelectionControls() {
       try {
         await invoke("start_capture");
       } catch (cause) {
-        setError(`无法启动录制：${String(cause)}`);
+        setError(t("无法启动录制：{error}", { error: String(cause) }));
         await invoke("cancel_countdown").catch(() => undefined);
       }
     };
     void run();
     return () => { cancelled = true; };
-  }, [phase, preferences.countdownEnabled, preferences.countdownSeconds]);
+  }, [phase, preferences.countdownEnabled, preferences.countdownSeconds, t]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -120,31 +122,31 @@ export function SelectionControls() {
       <div className="selection-controls-bar">
         <strong>
           {isDrawing
-            ? "智能选择区域"
+            ? t("智能选择区域")
             : phase === "countdown"
-            ? preferences.countdownEnabled ? `${countdown} 秒后开始` : "正在开始"
+            ? preferences.countdownEnabled ? t("{countdown} 秒后开始", { countdown }) : t("正在开始")
             : selection
               ? `${selection.captureRect.width} × ${selection.captureRect.height}`
-              : "等待选区"}
+              : t("等待选区")}
         </strong>
         <span>
           {isDrawing
-            ? "单击选窗口 · 拖动自由框选 · Esc 取消"
+            ? t("单击选窗口 · 拖动自由框选 · Esc 取消")
             : phase === "countdown"
-              ? preferences.countdownEnabled ? "Esc 取消" : "正在启动录制"
-              : "拖边框缩放 · 顶部手柄移动"}
+              ? preferences.countdownEnabled ? t("Esc 取消") : t("正在启动录制")
+              : t("拖边框缩放 · 顶部手柄移动")}
         </span>
         {phase !== "countdown" && !isDrawing && (
           <button onClick={() => void invoke("redraw_selection")}>
-            <RotateCcw size={15} />重新框选
+            <RotateCcw size={15} />{t("重新框选")}
           </button>
         )}
         {!isDrawing && (
           <button className="primary" disabled={!selection || phase === "countdown"} onClick={() => void start()}>
-            <Play size={15} />开始录制
+            <Play size={15} />{t("开始录制")}
           </button>
         )}
-        <button className="icon" aria-label="取消" onClick={() => void invoke(phase === "countdown" ? "cancel_countdown" : "cancel_selection")}>
+        <button className="icon" aria-label={t("取消")} onClick={() => void invoke(phase === "countdown" ? "cancel_countdown" : "cancel_selection")}>
           <X size={16} />
         </button>
       </div>

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -409,7 +409,10 @@ impl RecordingIndex {
 
     pub(crate) fn reconcile(&self) -> Result<(), String> {
         let directories = self.recording_directories()?;
-        let all_directories_available = directories.iter().all(|directory| directory.is_dir());
+        let available_directories = directories
+            .iter()
+            .filter(|directory| directory.is_dir())
+            .collect::<Vec<_>>();
         let mut recordings = Vec::new();
         for directory in &directories {
             recordings.extend(discover_recordings(directory)?);
@@ -418,16 +421,26 @@ impl RecordingIndex {
             let transaction = connection
                 .transaction()
                 .map_err(|error| error.to_string())?;
-            let existing_ids = {
+            let existing_recordings = {
                 let mut statement = transaction
-                    .prepare("SELECT id FROM recordings")
+                    .prepare("SELECT id, group_directory, main_path FROM recordings")
                     .map_err(|error| error.to_string())?;
-                let ids = statement
-                    .query_map([], |row| row.get::<_, String>(0))
+                let recordings = statement
+                    .query_map([], |row| {
+                        let id = row.get::<_, String>(0)?;
+                        let group_directory = row.get::<_, String>(1)?;
+                        let main_path = row.get::<_, String>(2)?;
+                        let path = if group_directory.is_empty() {
+                            PathBuf::from(main_path)
+                        } else {
+                            PathBuf::from(group_directory)
+                        };
+                        Ok((id, path))
+                    })
                     .map_err(|error| error.to_string())?
-                    .collect::<Result<HashSet<_>, _>>()
+                    .collect::<Result<HashMap<_, _>, _>>()
                     .map_err(|error| error.to_string())?;
-                ids
+                recordings
             };
             let mut discovered_ids = HashSet::with_capacity(recordings.len());
             for recording in recordings {
@@ -466,8 +479,16 @@ impl RecordingIndex {
                     )
                     .map_err(|error| error.to_string())?;
             }
-            if all_directories_available {
-                for stale_id in existing_ids.difference(&discovered_ids) {
+            for (stale_id, indexed_path) in existing_recordings
+                .iter()
+                .filter(|(id, _)| !discovered_ids.contains(*id))
+            {
+                // Only remove entries owned by a root that is currently
+                // available. Entries on disconnected drives remain indexed.
+                if available_directories
+                    .iter()
+                    .any(|directory| path_is_within(indexed_path, directory))
+                {
                     transaction
                         .execute("DELETE FROM recordings WHERE id = ?1", [stale_id])
                         .map_err(|error| error.to_string())?;
@@ -1353,7 +1374,7 @@ fn inspect_recording(path: &Path) -> Result<Option<DiscoveredRecording>, String>
         .map(|timestamp| timestamp.to_string())
         .unwrap_or_else(|| format!("import-{:016x}", stable_path_hash(path)));
     let name = if is_group_main(path) {
-        format!("FrameFlow-{id}.mp4")
+        format!("ScreenHarbor-{id}.mp4")
     } else {
         file_name
     };
@@ -1483,7 +1504,7 @@ fn group_id_from_main_path(path: &Path) -> Option<String> {
         return None;
     }
     let group_name = path.parent()?.file_name()?.to_str()?;
-    group_name.strip_prefix("FrameFlow-").map(ToOwned::to_owned)
+    strip_recording_prefix(group_name).map(ToOwned::to_owned)
 }
 
 fn recording_timestamp_from_group_id(id: &str) -> Option<u64> {
@@ -1498,10 +1519,15 @@ fn has_mp4_file_type_box(path: &Path) -> Result<bool, String> {
 }
 
 fn recording_timestamp_from_name(name: &str) -> Option<u64> {
-    name.strip_prefix("FrameFlow-")?
+    strip_recording_prefix(name)?
         .strip_suffix(".mp4")?
         .parse()
         .ok()
+}
+
+fn strip_recording_prefix(name: &str) -> Option<&str> {
+    name.strip_prefix("ScreenHarbor-")
+        .or_else(|| name.strip_prefix("FrameFlow-"))
 }
 
 fn system_time_millis(time: SystemTime) -> Option<u64> {
@@ -1527,6 +1553,31 @@ fn stable_path_hash(path: &Path) -> u64 {
         .fold(0xcbf29ce484222325, |hash, byte| {
             (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
         })
+}
+
+fn path_is_within(path: &Path, directory: &Path) -> bool {
+    if path.starts_with(directory) {
+        return true;
+    }
+    let mut ancestor = path;
+    let mut missing_components = Vec::new();
+    while !ancestor.exists() {
+        let Some(name) = ancestor.file_name() else {
+            return false;
+        };
+        missing_components.push(name.to_owned());
+        let Some(parent) = ancestor.parent() else {
+            return false;
+        };
+        ancestor = parent;
+    }
+    let Ok(mut resolved) = ancestor.canonicalize() else {
+        return false;
+    };
+    for component in missing_components.iter().rev() {
+        resolved.push(component);
+    }
+    resolved.starts_with(directory)
 }
 
 fn to_sql_integer(value: u64) -> i64 {
@@ -1562,7 +1613,7 @@ mod tests {
         }
 
         fn group_recording(&self, id: &str) -> PathBuf {
-            let directory = self.0.join("recordings").join(format!("FrameFlow-{id}"));
+            let directory = self.0.join("recordings").join(format!("ScreenHarbor-{id}"));
             fs::create_dir_all(&directory).unwrap();
             let path = directory.join("main.mp4");
             fs::write(&path, b"\0\0\0\x18ftypisom\0\0\0\0isomiso2").unwrap();
@@ -1584,6 +1635,18 @@ mod tests {
                 )
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn recording_names_accept_current_and_legacy_prefixes() {
+        assert_eq!(
+            recording_timestamp_from_name("ScreenHarbor-1700000000098.mp4"),
+            Some(1_700_000_000_098)
+        );
+        assert_eq!(
+            recording_timestamp_from_name("FrameFlow-1700000000099.mp4"),
+            Some(1_700_000_000_099)
+        );
     }
 
     impl Drop for TestWorkspace {
@@ -1651,6 +1714,21 @@ mod tests {
         )
         .unwrap();
 
+        index.reconcile().unwrap();
+
+        assert!(index.recent(5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn reconciliation_removes_a_recording_group_deleted_outside_the_app() {
+        let workspace = TestWorkspace::new("externally-deleted-group");
+        let recording = workspace.group_recording("1700000000100");
+        let group_directory = recording.parent().unwrap().to_path_buf();
+        let index = workspace.index();
+        workspace.complete(&index, &recording, Duration::from_secs(2));
+        assert_eq!(index.recent(5).unwrap().len(), 1);
+
+        fs::remove_dir_all(group_directory).unwrap();
         index.reconcile().unwrap();
 
         assert!(index.recent(5).unwrap().is_empty());

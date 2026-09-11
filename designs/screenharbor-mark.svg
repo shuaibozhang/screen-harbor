@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">ScreenHarbor mark</title>
+  <desc id="desc">Two offset folded forms in sage green and recording brick red.</desc>
+
+  <path fill="#566a5d" d="M62 140c0-23 13-43 34-54L278 13c22-12 49-12 71 0l101 51c19 10 19 28 0 38L224 217c-21 11-46 11-67 0l-63-32c-20-10-32-27-32-45Z"/>
+  <path fill="#b65b54" d="M43 382c0-18 11-35 27-44l227-130c22-13 48-13 69 0l82 47c25 14 25 38 0 52L213 459c-22 14-49 14-71 2l-71-41c-18-10-28-23-28-38Z"/>
+</svg>

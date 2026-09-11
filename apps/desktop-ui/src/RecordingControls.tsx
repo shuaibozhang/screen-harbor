@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { Mic, MicOff, Pause, Play, Square, Volume2, VolumeX } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { AudioWarningEvent, CaptureStats, LiveAudioInput, RecordingState, StorageWarningEvent } from "./domain";
+import { useI18n } from "./i18n";
 import "./recording-controls.css";
 
 function formatElapsed(milliseconds: number) {
@@ -13,6 +14,7 @@ function formatElapsed(milliseconds: number) {
 }
 
 export function RecordingControls() {
+  const { t } = useI18n();
   const [phase, setPhase] = useState<RecordingState>("idle");
   const [stats, setStats] = useState<CaptureStats | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -62,7 +64,7 @@ export function RecordingControls() {
         const current = await invoke<RecordingState>("get_recording_state");
         if (!disposed) setPhase(current);
       } catch (cause) {
-        if (!disposed) setError(`无法读取录制状态：${String(cause)}`);
+        if (!disposed) setError(t("无法读取录制状态：{error}", { error: String(cause) }));
       }
     });
     return () => {
@@ -72,7 +74,7 @@ export function RecordingControls() {
       unlistenExitBlocked?.();
       unlistenStorage?.();
     };
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     if (phase !== "recording" && phase !== "paused") return;
@@ -87,7 +89,7 @@ export function RecordingControls() {
         setError(null);
       } catch (cause) {
         if (disposed) return;
-        setError(`录制进程状态不可用：${String(cause)}`);
+        setError(t("录制进程状态不可用：{error}", { error: String(cause) }));
         return;
       }
       if (!disposed) timer = window.setTimeout(refresh, 250);
@@ -97,14 +99,14 @@ export function RecordingControls() {
       disposed = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [phase]);
+  }, [phase, t]);
 
   const togglePause = async () => {
     try {
       await invoke(phase === "paused" ? "resume_capture" : "pause_capture");
       setError(null);
     } catch {
-      setError("无法切换暂停状态");
+      setError(t("无法切换暂停状态"));
     }
   };
 
@@ -114,7 +116,7 @@ export function RecordingControls() {
     try {
       await invoke<RecordingState>("request_stop_capture");
     } catch (cause) {
-      setError(`保存录制失败：${String(cause)}`);
+      setError(t("保存录制失败：{error}", { error: String(cause) }));
     }
   };
 
@@ -133,23 +135,23 @@ export function RecordingControls() {
       } : current);
       setError(null);
     } catch (cause) {
-      setError(`无法切换音频静音：${String(cause)}`);
+      setError(t("无法切换音频静音：{error}", { error: String(cause) }));
     }
   };
 
   const systemAudio = stats?.audio?.systemAudio;
   const microphone = stats?.audio?.microphone;
   const encoderLabel = stats?.videoEncoder.hardwareAccelerated === true
-    ? "硬件 H.264"
+    ? t("硬件 H.264")
     : stats?.videoEncoder.hardwareAccelerated === false
-      ? "软件 H.264"
+      ? t("软件 H.264")
       : "H.264";
   const statsLabel = [
-    `${stats?.frameCount ?? 0} 帧`,
+    t("{count} 帧", { count: stats?.frameCount ?? 0 }),
     `${(stats?.effectiveFps ?? 0).toFixed(1)} FPS`,
-    (stats?.droppedFrames ?? 0) > 0 ? `丢 ${stats?.droppedFrames} 帧` : null,
+    (stats?.droppedFrames ?? 0) > 0 ? t("丢 {count} 帧", { count: stats?.droppedFrames ?? 0 }) : null,
     (stats?.audio?.droppedPackets ?? 0) > 0
-      ? `音频丢 ${stats?.audio?.droppedPackets} 包`
+      ? t("音频丢 {count} 包", { count: stats?.audio?.droppedPackets ?? 0 })
       : null,
     `${encoderLabel}${stats?.audio ? "/AAC" : ""} MP4`,
   ].filter(Boolean).join(" · ");
@@ -166,7 +168,7 @@ export function RecordingControls() {
   return (
     <main className="recording-controls-shell">
       <div className="recording-controls-bar">
-        <span className="recording-state">{stopping ? "正在保存" : phase === "paused" ? "已暂停" : "录制中"}</span>
+        <span className="recording-state">{t(stopping ? "正在保存" : phase === "paused" ? "已暂停" : "录制中")}</span>
         <strong>{formatElapsed(stats?.elapsedMs ?? 0)}</strong>
         <small
           className={statusMessage ? `recording-controls-message${statusIsWarning ? " warning" : ""}` : undefined}
@@ -175,23 +177,23 @@ export function RecordingControls() {
           {statusMessage ?? statsLabel}
         </small>
         {systemAudio?.enabled && (
-          <button className={`audio-control ${systemAudio.muted ? "muted" : ""}`} disabled={stopping || systemAudio.disconnected} title={systemAudio.disconnected ? "系统声音设备已断开" : systemAudio.muted ? "恢复系统声音" : "静音系统声音"} onClick={() => void toggleMute("systemAudio", systemAudio)}>
+          <button className={`audio-control ${systemAudio.muted ? "muted" : ""}`} disabled={stopping || systemAudio.disconnected} title={t(systemAudio.disconnected ? "系统声音设备已断开" : systemAudio.muted ? "恢复系统声音" : "静音系统声音")} onClick={() => void toggleMute("systemAudio", systemAudio)}>
             {systemAudio.muted || systemAudio.disconnected ? <VolumeX size={15} /> : <Volume2 size={15} />}
-            系统声
+            {t("系统声")}
           </button>
         )}
         {microphone?.enabled && (
-          <button className={`audio-control ${microphone.muted ? "muted" : ""}`} disabled={stopping || microphone.disconnected} title={microphone.disconnected ? "麦克风已断开" : microphone.muted ? "恢复麦克风" : "静音麦克风"} onClick={() => void toggleMute("microphone", microphone)}>
+          <button className={`audio-control ${microphone.muted ? "muted" : ""}`} disabled={stopping || microphone.disconnected} title={t(microphone.disconnected ? "麦克风已断开" : microphone.muted ? "恢复麦克风" : "静音麦克风")} onClick={() => void toggleMute("microphone", microphone)}>
             {microphone.muted || microphone.disconnected ? <MicOff size={15} /> : <Mic size={15} />}
-            麦克风
+            {t("麦克风")}
           </button>
         )}
         <button disabled={stopping} onClick={() => void togglePause()}>
           {phase === "paused" ? <Play size={15} /> : <Pause size={15} />}
-          {phase === "paused" ? "继续" : "暂停"}
+          {t(phase === "paused" ? "继续" : "暂停")}
         </button>
         <button className="finish" disabled={stopping} onClick={() => void stopAndSave()}>
-          <Square size={14} />{stopping ? "保存中…" : "停止并保存"}
+          <Square size={14} />{t(stopping ? "保存中…" : "停止并保存")}
         </button>
       </div>
     </main>

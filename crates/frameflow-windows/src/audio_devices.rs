@@ -35,7 +35,7 @@ pub struct DefaultAudioEndpoints {
 
 /// Discovers the current Windows multimedia-role endpoints. Device changes are
 /// intentionally resolved on demand so the main window reflects the active
-/// defaults without restarting FrameFlow.
+/// defaults without restarting ScreenHarbor.
 pub fn default_audio_endpoints() -> Result<DefaultAudioEndpoints, PlatformError> {
     let com = ComApartment::enter_multithreaded()?;
     let enumerator: IMMDeviceEnumerator =

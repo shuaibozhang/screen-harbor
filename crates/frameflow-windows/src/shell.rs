@@ -32,7 +32,7 @@ pub fn choose_recording_directory() -> Result<Option<PathBuf>, String> {
             .SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST)
             .map_err(|error| error.to_string())?;
         dialog
-            .SetTitle(&HSTRING::from("选择 FrameFlow 录像保存位置"))
+            .SetTitle(&HSTRING::from("选择 ScreenHarbor 录像保存位置"))
             .map_err(|error| error.to_string())?;
         if let Err(error) = dialog.Show(None) {
             if error.code() == windows::core::HRESULT::from_win32(ERROR_CANCELLED.0) {

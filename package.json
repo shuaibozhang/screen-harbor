@@ -1,20 +1,21 @@
 {
-  "name": "frameflow",
+  "name": "screenharbor",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.2.0-beta.1",
   "workspaces": [
     "apps/*"
   ],
   "scripts": {
-    "dev": "npm run dev --workspace @frameflow/desktop-ui",
+    "dev": "npm run dev --workspace @screenharbor/desktop-ui",
     "desktop:dev": "tauri dev",
     "provision:ffmpeg": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/provision-ffmpeg.ps1",
     "desktop:build": "npm run provision:ffmpeg && tauri build --no-bundle",
     "package:windows": "npm run provision:ffmpeg && tauri build --bundles nsis",
-    "build": "npm run build --workspace @frameflow/desktop-ui",
+    "release:beta": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-beta-release.ps1",
+    "build": "npm run build --workspace @screenharbor/desktop-ui",
     "test": "npm run test:ui && npm run test:recording-validator",
-    "test:ui": "npm run test --workspace @frameflow/desktop-ui",
-    "typecheck": "npm run typecheck --workspace @frameflow/desktop-ui",
+    "test:ui": "npm run test --workspace @screenharbor/desktop-ui",
+    "typecheck": "npm run typecheck --workspace @screenharbor/desktop-ui",
     "validate:recordings": "node scripts/validate-recordings.mjs",
     "test:recording-validator": "node --test scripts/validate-recordings.test.mjs"
   },

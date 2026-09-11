@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="960" viewBox="0 0 1440 960" role="img" aria-labelledby="title desc">
+  <title id="title">ScreenHarbor logo exploration</title>
+  <desc id="desc">Six original abstract logo directions inspired by the bold, memorable character of mature open-source creative tools.</desc>
+  <rect width="1440" height="960" fill="#faf8f3"/>
+
+  <g font-family="Inter, Segoe UI, Arial, sans-serif" fill="#202723">
+    <text x="96" y="92" font-size="46" font-weight="750" letter-spacing="-1.8">ScreenHarbor</text>
+    <text x="96" y="126" font-size="16" font-weight="550" letter-spacing="2.8" opacity=".52">SYMBOL EXPLORATION · ROUND 02</text>
+  </g>
+
+  <!-- A: an asymmetric folded S, broad and gestural -->
+  <g transform="translate(105 210)">
+    <path fill="#667a6b" d="M45 71C76 25 143 7 207 27l48 15-35 54-47-14c-30-9-60-4-75 13-8 9-8 18-1 24 8 8 26 10 53 10h31c62 0 96 27 96 72 0 54-49 88-116 88-48 0-91-13-121-39l38-49c24 19 53 29 84 29 29 0 49-10 49-25 0-13-13-19-42-19h-37c-65 0-103-28-103-75 0-15 5-28 16-40z"/>
+    <path fill="#b65b54" d="M77 202c24 19 53 29 84 29 18 0 33-4 41-11l35 48c-21 14-48 21-77 21-48 0-91-13-121-39z"/>
+    <text x="145" y="350" text-anchor="middle" fill="#202723" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="20" font-weight="700">A · CURRENT</text>
+  </g>
+
+  <!-- B: modular H with a deliberate off-axis bridge -->
+  <g transform="translate(525 210)">
+    <path fill="#202723" d="M39 28h70v87h69V28h70v261h-70V181h-69v108H39z"/>
+    <path fill="#667a6b" d="M109 115h98l-29 66H80z"/>
+    <text x="145" y="350" text-anchor="middle" fill="#202723" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="20" font-weight="700">B · JOIN</text>
+  </g>
+
+  <!-- C: three independent masses around a square counter -->
+  <g transform="translate(945 210)">
+    <path fill="#667a6b" d="M41 37h105v66H92v52H41z"/>
+    <path fill="#202723" d="M165 37h84v118h-52v-52h-32z"/>
+    <path fill="#b65b54" d="M41 174h52v49h104v-49h52v115H41z"/>
+    <text x="145" y="350" text-anchor="middle" fill="#202723" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="20" font-weight="700">C · COUNTER</text>
+  </g>
+
+  <!-- D: single sculptural silhouette, clipped forward edge -->
+  <g transform="translate(105 585)">
+    <path fill="#202723" d="M44 63c0-20 16-36 36-36h169v62h-94l93 74-93 99h94v62H76c-18 0-32-14-32-32v-54l80-75-80-58z"/>
+    <path fill="#b65b54" d="M44 105l80 58-80 75z"/>
+    <text x="145" y="366" text-anchor="middle" fill="#202723" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="20" font-weight="700">D · CUT</text>
+  </g>
+
+  <!-- E: two hooks clasping without forming a circle -->
+  <g transform="translate(525 585)">
+    <path fill="#667a6b" d="M41 29h103c61 0 99 33 99 85 0 46-31 77-80 83l-16-57c20-3 30-12 30-27 0-15-12-24-35-24H41z"/>
+    <path fill="#b65b54" d="M249 321H146c-61 0-99-33-99-85 0-46 31-77 80-83l16 57c-20 3-30 12-30 27 0 15 12 24 35 24h101z"/>
+    <text x="145" y="366" text-anchor="middle" fill="#202723" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="20" font-weight="700">E · CLASP</text>
+  </g>
+
+  <!-- F: three offset bars and a decisive vertical cut -->
+  <g transform="translate(945 585)">
+    <path fill="#202723" d="M33 35h171v62H92v43h112v62H92v51h112v62H33z"/>
+    <path fill="#667a6b" d="M204 35h57v280h-57z"/>
+    <path fill="#b65b54" d="M146 140h115v62H146z"/>
+    <text x="145" y="366" text-anchor="middle" fill="#202723" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="20" font-weight="700">F · SIGNAL</text>
+  </g>
+</svg>

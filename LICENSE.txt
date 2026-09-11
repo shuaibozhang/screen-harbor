@@ -1,0 +1,35 @@
+ScreenHarbor Beta Software License
+Version 1.0, effective 2026-09-08
+
+Copyright (c) 2026 the ScreenHarbor copyright holder. All rights reserved.
+
+Permission is granted to download, install, and use the unmodified ScreenHarbor Beta application for personal or internal evaluation purposes.
+
+You may redistribute the complete, unmodified installer at no charge only when you preserve the product name, copyright notices, third-party notices, and this license, and clearly identify the software as a Beta release. You may not sell, sublicense, modify, reverse engineer, or present ScreenHarbor or a modified copy as your own product, except where applicable law expressly permits otherwise.
+
+ScreenHarbor may create screen and audio recordings. You are solely responsible for obtaining any consent or permission required to record people, meetings, applications, copyrighted works, confidential information, or other content, and for complying with applicable laws and platform rules.
+
+THE BETA SOFTWARE IS PROVIDED "AS IS" AND MAY CONTAIN DEFECTS. TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE COPYRIGHT HOLDER DISCLAIMS ALL WARRANTIES AND IS NOT LIABLE FOR DATA LOSS, LOST PROFITS, BUSINESS INTERRUPTION, OR INDIRECT OR CONSEQUENTIAL DAMAGES ARISING FROM USE OF THE SOFTWARE.
+
+Third-party components included with ScreenHarbor remain subject to their respective licenses. In particular, the bundled FFmpeg runtime and its corresponding source materials are provided under the notices and license files installed alongside that runtime.
+
+This license terminates automatically if you materially breach its terms. Upon termination, you must stop redistributing the software. Rights that cannot lawfully be excluded remain unaffected.
+
+---
+
+ScreenHarbor Beta 软件许可
+版本 1.0，生效日期：2026-09-08
+
+版权所有 (c) 2026 ScreenHarbor 著作权人。保留所有权利。
+
+允许用户下载、安装及使用未经修改的 ScreenHarbor Beta，用于个人使用或内部评估。
+
+仅在完整保留产品名称、版权声明、第三方声明及本许可，并明确标注为 Beta 版本的前提下，用户可以免费转发未经修改的完整安装包。除适用法律明确允许外，不得出售、再许可、修改、反向工程本软件，也不得将 ScreenHarbor 或其修改版本冒充为自己的产品。
+
+ScreenHarbor 可以创建屏幕和音频录制。用户应自行取得录制人员、会议、应用程序、受版权保护作品、机密信息或其他内容所需的许可，并遵守适用法律及平台规则。
+
+本 Beta 软件按“现状”提供，可能存在缺陷。在法律允许的最大范围内，著作权人不作任何保证，也不对使用本软件造成的数据丢失、利润损失、业务中断或间接及后果性损害承担责任。
+
+ScreenHarbor 包含的第三方组件继续受各自许可证约束。随附的 FFmpeg 运行时及对应源码材料适用其安装目录内提供的声明和许可文件。
+
+如用户严重违反本许可，本许可将自动终止，用户必须停止分发本软件。法律规定不得排除的权利不受影响。

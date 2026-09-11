@@ -9,7 +9,8 @@ use serde::Serialize;
 
 const PART_FILE_NAME: &str = "main.mp4.part";
 const MAIN_FILE_NAME: &str = "main.mp4";
-const GROUP_PREFIX: &str = "FrameFlow-";
+const GROUP_PREFIX: &str = "ScreenHarbor-";
+const LEGACY_GROUP_PREFIX: &str = "FrameFlow-";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,7 +62,7 @@ pub(crate) fn interrupted_recordings(
                 .or_else(|| system_time_millis(metadata.modified().ok()?))
                 .unwrap_or_default();
             Ok(InterruptedRecording {
-                name: format!("FrameFlow-{}.mp4", candidate.id),
+                name: format!("{}{}.mp4", candidate.prefix, candidate.id),
                 id: candidate.id,
                 created_label: created_label(created_at_ms),
                 file_size_bytes: metadata.len(),
@@ -86,6 +87,7 @@ pub(crate) fn interrupted_group_for_id(roots: &[PathBuf], id: &str) -> Result<Pa
 
 struct PartCandidate {
     id: String,
+    prefix: &'static str,
     group_directory: PathBuf,
     part_path: PathBuf,
 }
@@ -105,7 +107,7 @@ fn part_candidates(roots: &[PathBuf]) -> Result<Vec<PartCandidate>, String> {
             let Some(group_name) = entry.file_name().to_str().map(ToOwned::to_owned) else {
                 continue;
             };
-            let Some(id) = group_name.strip_prefix(GROUP_PREFIX) else {
+            let Some((prefix, id)) = strip_group_prefix(&group_name) else {
                 continue;
             };
             if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -116,6 +118,7 @@ fn part_candidates(roots: &[PathBuf]) -> Result<Vec<PartCandidate>, String> {
             if part_path.is_file() {
                 candidates.push(PartCandidate {
                     id: id.to_owned(),
+                    prefix,
                     group_directory,
                     part_path,
                 });
@@ -123,6 +126,15 @@ fn part_candidates(roots: &[PathBuf]) -> Result<Vec<PartCandidate>, String> {
         }
     }
     Ok(candidates)
+}
+
+fn strip_group_prefix(name: &str) -> Option<(&'static str, &str)> {
+    name.strip_prefix(GROUP_PREFIX)
+        .map(|id| (GROUP_PREFIX, id))
+        .or_else(|| {
+            name.strip_prefix(LEGACY_GROUP_PREFIX)
+                .map(|id| (LEGACY_GROUP_PREFIX, id))
+        })
 }
 
 fn is_publishable_mp4(path: &Path) -> Result<bool, String> {
@@ -199,7 +211,11 @@ mod tests {
         }
 
         fn part(&self, id: &str, boxes: &[(&[u8; 4], &[u8])]) -> PathBuf {
-            let group = self.0.join(format!("FrameFlow-{id}"));
+            self.part_with_prefix(GROUP_PREFIX, id, boxes)
+        }
+
+        fn part_with_prefix(&self, prefix: &str, id: &str, boxes: &[(&[u8; 4], &[u8])]) -> PathBuf {
+            let group = self.0.join(format!("{prefix}{id}"));
             fs::create_dir_all(&group).unwrap();
             let part = group.join(PART_FILE_NAME);
             let mut file = File::create(&part).unwrap();
@@ -257,7 +273,15 @@ mod tests {
         assert!(interrupted_group_for_id(std::slice::from_ref(&directory.0), "../escape").is_err());
         assert_eq!(
             interrupted_group_for_id(std::slice::from_ref(&directory.0), "1700000000104",).unwrap(),
-            directory.0.join("FrameFlow-1700000000104")
+            directory.0.join("ScreenHarbor-1700000000104")
         );
+    }
+
+    #[test]
+    fn legacy_frameflow_groups_remain_visible() {
+        let directory = TestDirectory::new("legacy");
+        directory.part_with_prefix(LEGACY_GROUP_PREFIX, "1700000000105", &[(b"ftyp", b"isom")]);
+        let interrupted = interrupted_recordings(std::slice::from_ref(&directory.0)).unwrap();
+        assert_eq!(interrupted[0].name, "FrameFlow-1700000000105.mp4");
     }
 }

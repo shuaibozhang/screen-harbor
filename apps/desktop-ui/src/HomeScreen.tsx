@@ -11,7 +11,6 @@ import {
   Mic2,
   Minus,
   MonitorSpeaker,
-  Search,
   Settings,
   Square,
   Trash2,
@@ -19,6 +18,8 @@ import {
 } from "lucide-react";
 import type { AppSnapshot, InterruptedRecording, OutputResolution, OutputStatus, RecentRecording } from "./domain";
 import { isTauriRuntime } from "./bridge";
+import { localizeRelativeTime, useI18n } from "./i18n";
+import screenHarborMark from "./assets/screenharbor-mark.svg";
 import "./home-screen.css";
 
 interface HomeScreenProps {
@@ -28,8 +29,6 @@ interface HomeScreenProps {
   savingPreview: boolean;
   changingSaveDirectory: boolean;
   showAllRecordings: boolean;
-  recordingQuery: string;
-  selectedRecordingIds: Set<string>;
   openingRecording: string | null;
   deletingRecordings: boolean;
   removingRecordingIds: Set<string>;
@@ -40,18 +39,15 @@ interface HomeScreenProps {
   onChangeAudio: (source: "microphone" | "systemAudio", enabled: boolean, deviceId?: string) => void;
   onTogglePreview: (enabled: boolean) => void;
   onShowAllRecordings: (visible: boolean) => void;
-  onRecordingQueryChange: (query: string) => void;
-  onToggleRecordingSelection: (recordingId: string) => void;
-  onSetVisibleSelection: (recordingIds: string[], selected: boolean) => void;
   onRequestRecordingDeletion: (recordingIds: string[]) => void;
   onOpenRecordingLocation: (recordingId: string) => void;
   onOpenInterruptedLocation: (recordingId: string) => void;
   onRequestInterruptedDeletion: (recording: InterruptedRecording) => void;
 }
 
-function resolutionLabel(resolution: OutputResolution) {
+function resolutionLabel(resolution: OutputResolution, t: (source: string) => string) {
   return resolution.mode === "native"
-    ? "原始分辨率"
+    ? t("原始分辨率")
     : `${resolution.width} × ${resolution.height}`;
 }
 
@@ -61,8 +57,8 @@ function formatLabel(format: AppSnapshot["previewFormat"]) {
   return "MP4";
 }
 
-function formatDuration(seconds?: number) {
-  if (seconds === undefined) return "时长未知";
+function formatDuration(seconds: number | undefined, t: (source: string) => string) {
+  if (seconds === undefined) return t("时长未知");
   const wholeSeconds = Math.max(0, Math.round(seconds));
   const minutes = Math.floor(wholeSeconds / 60);
   const remainder = wholeSeconds % 60;
@@ -76,12 +72,12 @@ function formatFileSize(bytes: number) {
     : `${Math.max(mebibytes, 0.1).toFixed(1)} MB`;
 }
 
-function previewStatusLabel(status: OutputStatus) {
-  if (status === "completed") return "轻量预览已生成";
-  if (status === "processing") return "正在生成轻量预览";
-  if (status === "failed") return "轻量预览生成失败";
-  if (status === "pending") return "轻量预览等待处理";
-  return "仅高清母版";
+function previewStatusLabel(status: OutputStatus, t: (source: string) => string) {
+  if (status === "completed") return t("轻量预览已生成");
+  if (status === "processing") return t("正在生成轻量预览");
+  if (status === "failed") return t("轻量预览生成失败");
+  if (status === "pending") return t("轻量预览等待处理");
+  return t("仅高清母版");
 }
 
 async function runWindowAction(action: "minimize" | "maximize" | "close") {
@@ -109,8 +105,6 @@ export function HomeScreen({
   savingPreview,
   changingSaveDirectory,
   showAllRecordings,
-  recordingQuery,
-  selectedRecordingIds,
   openingRecording,
   deletingRecordings,
   removingRecordingIds,
@@ -121,24 +115,20 @@ export function HomeScreen({
   onChangeAudio,
   onTogglePreview,
   onShowAllRecordings,
-  onRecordingQueryChange,
-  onToggleRecordingSelection,
-  onSetVisibleSelection,
   onRequestRecordingDeletion,
   onOpenRecordingLocation,
   onOpenInterruptedLocation,
   onRequestInterruptedDeletion,
 }: HomeScreenProps) {
-  const normalizedQuery = recordingQuery.trim().toLocaleLowerCase();
-  const filteredRecordings = normalizedQuery
-    ? snapshot.recentRecordings.filter((recording) => recording.name.toLocaleLowerCase().includes(normalizedQuery))
-    : snapshot.recentRecordings;
-  const visibleRecordings = showAllRecordings || normalizedQuery
-    ? filteredRecordings
-    : filteredRecordings.slice(0, 3);
-  const allVisibleSelected = visibleRecordings.length > 0
-    && visibleRecordings.every((recording) => selectedRecordingIds.has(recording.id));
+  const { locale, t } = useI18n();
+  const visibleRecordings = showAllRecordings
+    ? snapshot.recentRecordings
+    : snapshot.recentRecordings.slice(0, 3);
   const canConfigure = snapshot.recordingState === "idle";
+  const audioSummary = [
+    snapshot.microphone.enabled ? t("麦克风") : null,
+    snapshot.systemAudio.enabled ? t("系统声音") : null,
+  ].filter(Boolean).join(" + ") || t("无声音");
 
   return (
     <main className="shell home-shell">
@@ -148,70 +138,73 @@ export function HomeScreen({
         onDoubleClick={() => void runWindowAction("maximize")}
       >
         <div className="app-brand" data-tauri-drag-region>
-          <span className="app-brand-mark" aria-hidden="true" />
-          <span data-tauri-drag-region>FrameFlow</span>
+          <img className="app-brand-mark" src={screenHarborMark} alt="" draggable={false} />
+          <span className="app-brand-name" data-tauri-drag-region>
+            <span className="app-brand-screen" data-tauri-drag-region>Screen</span>
+            <span className="app-brand-harbor" data-tauri-drag-region>Harbor</span>
+          </span>
         </div>
         <div className="window-actions" onDoubleClick={(event) => event.stopPropagation()}>
-          <button type="button" aria-label="打开设置" onClick={onOpenSettings}><Settings size={20} /></button>
-          <button type="button" aria-label="最小化" onClick={() => void runWindowAction("minimize")}><Minus size={20} /></button>
-          <button type="button" aria-label="最大化或还原" onClick={() => void runWindowAction("maximize")}><Square size={17} /></button>
-          <button className="window-close" type="button" aria-label="关闭" onClick={() => void runWindowAction("close")}><X size={21} /></button>
+          <button type="button" aria-label={t("打开设置")} onClick={onOpenSettings}><Settings size={18} strokeWidth={1.5} /></button>
+          <button type="button" aria-label={t("最小化")} onClick={() => void runWindowAction("minimize")}><Minus size={18} strokeWidth={1.5} /></button>
+          <button type="button" aria-label={t("最大化或还原")} onClick={() => void runWindowAction("maximize")}><Square size={15} strokeWidth={1.5} /></button>
+          <button className="window-close" type="button" aria-label={t("关闭")} onClick={() => void runWindowAction("close")}><X size={19} strokeWidth={1.5} /></button>
         </div>
       </header>
 
       <div className="home-scroll">
-        {alert && <div className="home-alert" role="alert">{alert}</div>}
+        {alert && <div className="home-alert" role="alert">{t(alert)}</div>}
 
         <section className="home-section" aria-labelledby="audio-heading">
-          <h1 id="audio-heading">录制声音</h1>
+          <h1 id="audio-heading">{t("录制声音")}</h1>
           <div className="preference-list">
             <div className="preference-row audio-preference-row">
-              <Mic2 size={28} strokeWidth={1.45} />
-              <span className="preference-copy">
-                <strong>麦克风</strong>
+              <span className="preference-icon"><Mic2 size={20} strokeWidth={1.5} /></span>
+              <strong className="audio-label">{t("麦克风")}</strong>
+              <span className="device-select">
                 <select
-                  aria-label="选择麦克风"
+                  aria-label={t("选择麦克风")}
                   value={snapshot.microphone.selectedDeviceId ?? ""}
                   disabled={savingAudio !== null || !canConfigure}
                   onChange={(event) => onChangeAudio("microphone", snapshot.microphone.enabled, event.currentTarget.value || undefined)}
                 >
-                  <option value="">跟随系统默认{snapshot.microphone.devices.some((device) => device.isDefault) ? "" : "（当前不可用）"}</option>
-                  {snapshot.microphone.selectedDeviceId && !snapshot.microphone.devices.some((device) => device.id === snapshot.microphone.selectedDeviceId) && <option value={snapshot.microphone.selectedDeviceId}>之前选择的麦克风（当前不可用）</option>}
-                  {snapshot.microphone.devices.map((device) => <option key={device.id} value={device.id}>{device.name}{device.isDefault ? "（当前默认）" : ""}</option>)}
+                  <option value="">{t("跟随系统默认")}{snapshot.microphone.devices.some((device) => device.isDefault) ? "" : t("（当前不可用）")}</option>
+                  {snapshot.microphone.selectedDeviceId && !snapshot.microphone.devices.some((device) => device.id === snapshot.microphone.selectedDeviceId) && <option value={snapshot.microphone.selectedDeviceId}>{t("之前选择的麦克风（当前不可用）")}</option>}
+                  {snapshot.microphone.devices.map((device) => <option key={device.id} value={device.id}>{device.name}{device.isDefault ? t("（当前默认）") : ""}</option>)}
                 </select>
+                <ChevronDown size={14} strokeWidth={1.5} aria-hidden="true" />
               </span>
-              <span className="preference-state">{snapshot.microphone.available ? (snapshot.microphone.enabled ? "已开启" : "未开启") : "不可用"}</span>
               <button
                 className={snapshot.microphone.enabled ? "sage-switch enabled" : "sage-switch"}
                 type="button"
                 role="switch"
-                aria-label="录制麦克风"
+                aria-label={t("录制麦克风")}
                 aria-checked={snapshot.microphone.enabled}
                 disabled={(!snapshot.microphone.available && !snapshot.microphone.enabled) || savingAudio !== null || !canConfigure}
                 onClick={() => onChangeAudio("microphone", !snapshot.microphone.enabled, snapshot.microphone.selectedDeviceId)}
               ><span /></button>
             </div>
             <div className="preference-row audio-preference-row">
-              <MonitorSpeaker size={28} strokeWidth={1.45} />
-              <span className="preference-copy">
-                <strong>系统声音</strong>
+              <span className="preference-icon"><MonitorSpeaker size={20} strokeWidth={1.5} /></span>
+              <strong className="audio-label">{t("系统声音")}</strong>
+              <span className="device-select">
                 <select
-                  aria-label="选择系统声音输出设备"
+                  aria-label={t("选择系统声音输出设备")}
                   value={snapshot.systemAudio.selectedDeviceId ?? ""}
                   disabled={savingAudio !== null || !canConfigure}
                   onChange={(event) => onChangeAudio("systemAudio", snapshot.systemAudio.enabled, event.currentTarget.value || undefined)}
                 >
-                  <option value="">跟随系统默认{snapshot.systemAudio.devices.some((device) => device.isDefault) ? "" : "（当前不可用）"}</option>
-                  {snapshot.systemAudio.selectedDeviceId && !snapshot.systemAudio.devices.some((device) => device.id === snapshot.systemAudio.selectedDeviceId) && <option value={snapshot.systemAudio.selectedDeviceId}>之前选择的输出设备（当前不可用）</option>}
-                  {snapshot.systemAudio.devices.map((device) => <option key={device.id} value={device.id}>{device.name}{device.isDefault ? "（当前默认）" : ""}</option>)}
+                  <option value="">{t("跟随系统默认")}{snapshot.systemAudio.devices.some((device) => device.isDefault) ? "" : t("（当前不可用）")}</option>
+                  {snapshot.systemAudio.selectedDeviceId && !snapshot.systemAudio.devices.some((device) => device.id === snapshot.systemAudio.selectedDeviceId) && <option value={snapshot.systemAudio.selectedDeviceId}>{t("之前选择的输出设备（当前不可用）")}</option>}
+                  {snapshot.systemAudio.devices.map((device) => <option key={device.id} value={device.id}>{device.name}{device.isDefault ? t("（当前默认）") : ""}</option>)}
                 </select>
+                <ChevronDown size={14} strokeWidth={1.5} aria-hidden="true" />
               </span>
-              <span className="preference-state">{snapshot.systemAudio.available ? (snapshot.systemAudio.enabled ? "已开启" : "未开启") : "不可用"}</span>
               <button
                 className={snapshot.systemAudio.enabled ? "sage-switch enabled" : "sage-switch"}
                 type="button"
                 role="switch"
-                aria-label="录制系统声音"
+                aria-label={t("录制系统声音")}
                 aria-checked={snapshot.systemAudio.enabled}
                 disabled={(!snapshot.systemAudio.available && !snapshot.systemAudio.enabled) || savingAudio !== null || !canConfigure}
                 onClick={() => onChangeAudio("systemAudio", !snapshot.systemAudio.enabled, snapshot.systemAudio.selectedDeviceId)}
@@ -221,29 +214,28 @@ export function HomeScreen({
         </section>
 
         <section className="home-section" aria-labelledby="output-heading">
-          <h1 id="output-heading">输出文件</h1>
+          <h1 id="output-heading">{t("输出文件")}</h1>
           <div className="preference-list">
             <button className="preference-row preference-action" type="button" onClick={onOpenSettings}>
               <FileVideo2 size={27} strokeWidth={1.45} />
               <span className="preference-copy">
-                <strong>高清母版</strong>
-                <small>MP4 · {resolutionLabel(snapshot.outputResolution)} · {snapshot.captureFps} FPS</small>
+                <strong>{t("高清母版")}</strong>
+                <small>MP4 · {resolutionLabel(snapshot.outputResolution, t)} · {snapshot.captureFps} FPS</small>
               </span>
               <ChevronDown size={17} />
             </button>
             <div className="preference-row preview-row">
               <FileVideo2 size={27} strokeWidth={1.45} />
               <span className="preference-copy">
-                <strong>轻量预览</strong>
-                <small>{formatLabel(snapshot.previewFormat)} · {resolutionLabel(snapshot.previewResolution)} · {snapshot.previewFps} FPS</small>
-                <span className="preference-note">关闭后不生成轻量预览及对应封面</span>
+                <strong>{t("同时生成轻量预览")}</strong>
+                <small>{formatLabel(snapshot.previewFormat)} · {resolutionLabel(snapshot.previewResolution, t)} · {snapshot.previewFps} FPS</small>
               </span>
               <button
                 className={`sage-switch ${snapshot.previewEnabled ? "enabled" : ""}`}
                 type="button"
                 role="switch"
                 aria-checked={snapshot.previewEnabled}
-                aria-label="生成轻量预览和封面"
+                aria-label={t("生成轻量预览和封面")}
                 disabled={savingPreview || !canConfigure}
                 onClick={() => onTogglePreview(!snapshot.previewEnabled)}
               ><span /></button>
@@ -252,7 +244,7 @@ export function HomeScreen({
         </section>
 
         <section className="home-section" aria-labelledby="save-heading">
-          <h1 id="save-heading">保存位置</h1>
+          <h1 id="save-heading">{t("保存位置")}</h1>
           <div className="preference-row save-row">
             <Folder size={27} strokeWidth={1.45} />
             <span className="save-path" title={snapshot.saveDirectory}>{snapshot.saveDirectory}</span>
@@ -261,21 +253,21 @@ export function HomeScreen({
               type="button"
               disabled={changingSaveDirectory || !canConfigure}
               onClick={onChangeSaveDirectory}
-            >{changingSaveDirectory ? "选择中…" : "更改"}</button>
+            >{t(changingSaveDirectory ? "选择中…" : "更改")}</button>
           </div>
         </section>
 
         {snapshot.interruptedRecordings.length > 0 && (
           <section className="home-section interrupted-section" aria-labelledby="interrupted-heading">
-            <h1 id="interrupted-heading">未完成录制</h1>
-            <p className="section-note"><AlertTriangle size={16} />异常退出留下的文件已原样保留，可打开位置检查或移入回收站。</p>
+            <h1 id="interrupted-heading">{t("未完成录制")}</h1>
+            <p className="section-note"><AlertTriangle size={16} />{t("异常退出留下的文件已原样保留，可打开位置检查或移入回收站。")}</p>
             <div className="preference-list">
               {snapshot.interruptedRecordings.map((recording) => (
                 <div className={`interrupted-row${removingInterruptedId === recording.id ? " removing" : ""}`} key={recording.id}>
                   <FileVideo2 size={25} strokeWidth={1.45} />
-                  <span className="preference-copy"><strong>{recording.name}</strong><small>{recording.createdLabel} · {formatFileSize(recording.fileSizeBytes)}</small></span>
-                  <button className="row-tool" type="button" onClick={() => onOpenInterruptedLocation(recording.id)}><FolderOpen size={16} />打开位置</button>
-                  <button className="row-icon-action danger" type="button" aria-label={`删除未完成录制 ${recording.name}`} onClick={() => onRequestInterruptedDeletion(recording)}><Trash2 size={17} /></button>
+                  <span className="preference-copy"><strong>{recording.name}</strong><small>{localizeRelativeTime(locale, recording.createdLabel)} · {formatFileSize(recording.fileSizeBytes)}</small></span>
+                  <button className="row-tool" type="button" onClick={() => onOpenInterruptedLocation(recording.id)}><FolderOpen size={16} />{t("打开位置")}</button>
+                  <button className="row-icon-action danger" type="button" aria-label={t("删除未完成录制 {name}", { name: recording.name })} onClick={() => onRequestInterruptedDeletion(recording)}><Trash2 size={17} /></button>
                 </div>
               ))}
             </div>
@@ -284,47 +276,31 @@ export function HomeScreen({
 
         <section className="home-section recent-section" aria-labelledby="recent-heading">
           <div className="home-section-heading">
-            <h1 id="recent-heading">最近录制</h1>
-            {snapshot.recentRecordings.length > 3 && !normalizedQuery && (
-              <button className="text-action" type="button" onClick={() => onShowAllRecordings(!showAllRecordings)}>{showAllRecordings ? "收起" : "查看全部"}</button>
+            <h1 id="recent-heading">{t("最近录制")}</h1>
+            {snapshot.recentRecordings.length > 3 && (
+              <button className="text-action" type="button" onClick={() => onShowAllRecordings(!showAllRecordings)}>{t(showAllRecordings ? "收起" : "查看全部")}</button>
             )}
           </div>
 
-          {(snapshot.recentRecordings.length > 3 || normalizedQuery || selectedRecordingIds.size > 0) && (
-            <div className="library-tools home-library-tools">
-              <label className="library-search">
-                <Search size={14} />
-                <input value={recordingQuery} onChange={(event) => onRecordingQueryChange(event.target.value)} placeholder="搜索录制名称" aria-label="搜索录制名称" />
-              </label>
-              <button className="library-select-all" type="button" onClick={() => onSetVisibleSelection(visibleRecordings.map((recording) => recording.id), !allVisibleSelected)}>{allVisibleSelected ? "取消全选" : "全选当前"}</button>
-              {selectedRecordingIds.size > 0 && (
-                <button className="library-delete-selected" type="button" onClick={() => onRequestRecordingDeletion([...selectedRecordingIds])}><Trash2 size={13} />移入回收站（{selectedRecordingIds.size}）</button>
-              )}
-            </div>
-          )}
-
           {snapshot.recentRecordings.length === 0 ? (
-            <div className="home-empty"><Clock3 size={22} /><span><strong>还没有录制</strong><small>完成的内容会出现在这里</small></span></div>
-          ) : visibleRecordings.length === 0 ? (
-            <div className="home-empty"><Search size={20} /><span><strong>没有匹配的录制</strong><small>换一个名称关键词试试</small></span></div>
+            <div className="home-empty"><Clock3 size={22} /><span><strong>{t("还没有录制")}</strong><small>{t("完成的内容会出现在这里")}</small></span></div>
           ) : (
-            <div className={`home-recording-list ${showAllRecordings || normalizedQuery ? "expanded" : ""}`}>
+            <div className={`home-recording-list ${showAllRecordings ? "expanded" : ""}`}>
               {visibleRecordings.map((recording) => (
                 <article className={`home-recording${removingRecordingIds.has(recording.id) ? " removing" : ""}`} key={recording.id}>
-                  <input className="recording-select" type="checkbox" aria-label={`选择 ${recording.name}`} checked={selectedRecordingIds.has(recording.id)} onChange={() => onToggleRecordingSelection(recording.id)} />
                   <RecordingThumbnail recording={recording} />
                   <div className="recording-copy">
                     <strong>{recording.name}</strong>
                     <span className="recording-meta">
-                      <span><CalendarDays size={14} />{recording.createdLabel}</span>
-                      <span><Clock3 size={14} />{formatDuration(recording.durationSeconds)}</span>
+                      <span><CalendarDays size={14} />{localizeRelativeTime(locale, recording.createdLabel)}</span>
+                      <span><Clock3 size={14} />{formatDuration(recording.durationSeconds, t)}</span>
                       <span><FileVideo2 size={14} />MP4</span>
                     </span>
-                    <small>{previewStatusLabel(recording.previewStatus)}</small>
+                    <small>{previewStatusLabel(recording.previewStatus, t)}</small>
                   </div>
                   <div className="recording-actions">
-                    <button className="row-icon-action" aria-label={`打开 ${recording.name} 所在文件夹`} title="打开所在文件夹" disabled={openingRecording !== null} onClick={() => onOpenRecordingLocation(recording.id)}><FolderOpen size={17} /></button>
-                    <button className="row-icon-action danger recording-remove" aria-label={`删除 ${recording.name}`} title="移入回收站" disabled={deletingRecordings} onClick={() => onRequestRecordingDeletion([recording.id])}><Trash2 size={15} /></button>
+                    <button className="row-icon-action" aria-label={t("打开 {name} 所在文件夹", { name: recording.name })} title={t("打开所在文件夹")} disabled={openingRecording !== null} onClick={() => onOpenRecordingLocation(recording.id)}><FolderOpen size={17} /></button>
+                    <button className="row-icon-action danger recording-remove" aria-label={t("删除 {name}", { name: recording.name })} title={t("移入回收站")} disabled={deletingRecordings} onClick={() => onRequestRecordingDeletion([recording.id])}><Trash2 size={15} /></button>
                   </div>
                 </article>
               ))}
@@ -334,8 +310,13 @@ export function HomeScreen({
       </div>
 
       <footer className="home-footer">
+        <div className="current-config" aria-label={t("当前录制配置")}>
+          <strong>{t("当前配置")}</strong>
+          <span>{resolutionLabel(snapshot.outputResolution, t)} · {snapshot.captureFps} FPS · {audioSummary}{snapshot.previewEnabled ? ` · ${t("含轻量预览")}` : ""}</span>
+        </div>
         <button className="record-button" type="button" disabled={!canConfigure} onClick={onStartSelection}>
-          {canConfigure ? "开始录屏" : "录制进行中"}
+          <span className="record-dot" aria-hidden="true" />
+          {t(canConfigure ? "开始录屏" : "录制进行中")}
         </button>
       </footer>
     </main>

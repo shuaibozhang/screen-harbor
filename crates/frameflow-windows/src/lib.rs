@@ -118,7 +118,7 @@ pub fn graphics_capture_supported() -> Result<bool, PlatformError> {
     Ok(GraphicsCaptureSession::IsSupported()?)
 }
 
-/// Excludes a FrameFlow-owned window from supported Windows capture paths.
+/// Excludes a ScreenHarbor-owned window from supported Windows capture paths.
 /// This is a UX measure, not a content-protection boundary.
 pub fn exclude_window_from_capture(hwnd: isize) -> Result<(), PlatformError> {
     let hwnd = HWND(hwnd as *mut core::ffi::c_void);

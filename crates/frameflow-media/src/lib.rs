@@ -525,7 +525,7 @@ fn resolve_ffmpeg() -> Result<PathBuf, String> {
             return Ok(path);
         }
     }
-    Err("FFmpeg is unavailable; install it or place ffmpeg.exe beside FrameFlow".to_owned())
+    Err("FFmpeg is unavailable; install it or place ffmpeg.exe beside ScreenHarbor".to_owned())
 }
 
 fn bundled_ffmpeg_candidates(executable: &Path) -> [PathBuf; 6] {
@@ -719,14 +719,14 @@ mod tests {
     #[test]
     fn bundled_runtime_layouts_are_checked_before_machine_installations() {
         let candidates =
-            bundled_ffmpeg_candidates(Path::new(r"C:\Program Files\FrameFlow\frameflow.exe"));
+            bundled_ffmpeg_candidates(Path::new(r"C:\Program Files\ScreenHarbor\screenharbor.exe"));
         assert_eq!(
             candidates[1],
-            PathBuf::from(r"C:\Program Files\FrameFlow\ffmpeg\ffmpeg.exe")
+            PathBuf::from(r"C:\Program Files\ScreenHarbor\ffmpeg\ffmpeg.exe")
         );
         assert_eq!(
             candidates[4],
-            PathBuf::from(r"C:\Program Files\FrameFlow\resources\ffmpeg\ffmpeg.exe")
+            PathBuf::from(r"C:\Program Files\ScreenHarbor\resources\ffmpeg\ffmpeg.exe")
         );
     }
 }

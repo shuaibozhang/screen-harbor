@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="760" viewBox="0 0 1440 760" role="img" aria-labelledby="title desc">
+  <title id="title">ScreenHarbor logo theme preview</title>
+  <desc id="desc">Primary logo and standalone mark shown in the current ScreenHarbor interface palette.</desc>
+  <rect width="1440" height="760" fill="#faf8f3"/>
+
+  <text x="88" y="78" fill="#202723" font-family="Inter, 'Segoe UI', sans-serif" font-size="18" font-weight="650" letter-spacing="2.8">SCREENHARBOR · PRIMARY MARK</text>
+  <line x1="88" y1="106" x2="1352" y2="106" stroke="#e3dfd6"/>
+
+  <g transform="translate(98 194)">
+    <path fill="#566a5d" d="M34 56c0-10 6-20 15-25L139 2c11-5 23-5 34 1l50 25c9 5 9 13 0 18L112 103c-10 5-22 5-32 0L49 87C40 82 34 70 34 56Z"/>
+    <path fill="#b65b54" d="M24 178c0-8 5-16 13-21l112-64c10-6 23-6 33 0l40 23c12 7 12 18 0 25L106 216c-10 7-23 7-34 1l-35-20c-8-5-13-11-13-19Z"/>
+    <text x="286" y="194" font-family="Inter, 'Arial Rounded MT Bold', 'Segoe UI', sans-serif" font-size="150" font-weight="760" letter-spacing="-7"><tspan fill="#566a5d">Screen</tspan><tspan fill="#b65b54">Harbor</tspan></text>
+  </g>
+
+  <line x1="88" y1="500" x2="1352" y2="500" stroke="#e3dfd6"/>
+  <g transform="translate(88 555)" font-family="Inter, 'Segoe UI', sans-serif">
+    <rect width="42" height="42" rx="8" fill="#566a5d"/><text x="58" y="28" fill="#202723" font-size="17" font-weight="650">Sage strong · #566a5d</text>
+    <rect x="338" width="42" height="42" rx="8" fill="#b65b54"/><text x="396" y="28" fill="#202723" font-size="17" font-weight="650">Recording brick · #b65b54</text>
+    <rect x="748" width="42" height="42" rx="8" fill="#202723"/><text x="806" y="28" fill="#202723" font-size="17" font-weight="650">Ink · #202723</text>
+    <rect x="1048" width="42" height="42" rx="8" fill="#f1eee6" stroke="#e3dfd6"/><text x="1106" y="28" fill="#202723" font-size="17" font-weight="650">Soft surface · #f1eee6</text>
+  </g>
+
+  <g transform="translate(88 655)" font-family="Inter, 'Segoe UI', sans-serif" fill="#737970" font-size="15">
+    <text>Transparent production SVG · palette matched to the current desktop interface</text>
+  </g>
+</svg>

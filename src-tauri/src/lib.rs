@@ -248,8 +248,9 @@ struct StorageConfig {
 impl Default for StorageConfig {
     fn default() -> Self {
         let current_directory = default_save_directory();
+        let legacy_directory = legacy_default_save_directory();
         Self {
-            library_directories: vec![current_directory.clone()],
+            library_directories: vec![current_directory.clone(), legacy_directory],
             current_directory,
         }
     }
@@ -342,7 +343,13 @@ fn get_app_snapshot(
         .state();
     let save_directory = current_save_directory(&state)?;
     let save_directory_available_bytes = available_space(&save_directory).ok();
-    let recent_recordings = recording_index(&state, &app)?.recent(usize::MAX)?;
+    let index = recording_index(&state, &app)?;
+    // The user may remove a recording group outside ScreenHarbor. Reconcile on
+    // every library snapshot so stale database rows never outlive the files
+    // they describe. Missing library roots are still preserved by reconcile(),
+    // which avoids treating a disconnected drive as a mass deletion.
+    index.reconcile()?;
+    let recent_recordings = index.recent(usize::MAX)?;
     let interrupted_recordings = if recording_state == RecordingState::Idle {
         interrupted_recordings(&storage_directories(&state)?)?
     } else {
@@ -1345,7 +1352,7 @@ fn start_capture(
             StorageWarningEvent {
                 health: StorageHealth::Unavailable,
                 available_bytes: None,
-                message: Some("磁盘保护无法启动，FrameFlow 正在安全停止录制。".to_owned()),
+                message: Some("磁盘保护无法启动，ScreenHarbor 正在安全停止录制。".to_owned()),
                 auto_stopping: true,
             },
         );
@@ -1517,11 +1524,11 @@ fn run_storage_watchdog(app: tauri::AppHandle, directory: PathBuf, cancelled: Ar
                     format_storage_bytes(available_bytes.unwrap_or_default())
                 )),
                 StorageHealth::Critical => Some(format!(
-                    "保存磁盘仅剩 {}，FrameFlow 正在自动停止并保存。",
+                    "保存磁盘仅剩 {}，ScreenHarbor 正在自动停止并保存。",
                     format_storage_bytes(available_bytes.unwrap_or_default())
                 )),
                 StorageHealth::Unavailable => {
-                    Some("保存位置已断开或不可访问，FrameFlow 正在尝试停止并保存。".to_owned())
+                    Some("保存位置已断开或不可访问，ScreenHarbor 正在尝试停止并保存。".to_owned())
                 }
             };
             let _ = app.emit(
@@ -1604,7 +1611,7 @@ fn complete_finalization(app: &tauri::AppHandle, result: Result<FinalizedCapture
                 .output_path
                 .file_name()
                 .and_then(|name| name.to_str())
-                .unwrap_or("FrameFlow recording.mp4")
+                .unwrap_or("ScreenHarbor recording.mp4")
                 .to_owned();
             let (frozen_preview_profile, cover_enabled) = state
                 .output_config
@@ -1885,11 +1892,11 @@ fn request_safe_exit(app: &tauri::AppHandle) {
 }
 
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, TRAY_SHOW_ID, "显示 FrameFlow", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, TRAY_SHOW_ID, "显示 ScreenHarbor", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, TRAY_QUIT_ID, "退出", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &quit])?;
-    let mut builder = TrayIconBuilder::with_id("frameflow")
-        .tooltip("FrameFlow")
+    let mut builder = TrayIconBuilder::with_id("screenharbor")
+        .tooltip("ScreenHarbor")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -1959,6 +1966,13 @@ fn position_capture_toolbar(
 fn default_save_directory() -> PathBuf {
     std::env::var_os("USERPROFILE")
         .map(PathBuf::from)
+        .map(|profile| profile.join("Videos").join("ScreenHarbor"))
+        .unwrap_or_else(|| PathBuf::from(r"C:\Users\Public\Videos\ScreenHarbor"))
+}
+
+fn legacy_default_save_directory() -> PathBuf {
+    std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
         .map(|profile| profile.join("Videos").join("FrameFlow"))
         .unwrap_or_else(|| PathBuf::from(r"C:\Users\Public\Videos\FrameFlow"))
 }
@@ -2007,7 +2021,7 @@ fn allocate_recording_paths_in(
     directory: &std::path::Path,
     id: &str,
 ) -> Result<(PathBuf, PathBuf), String> {
-    let group_directory = directory.join(format!("FrameFlow-{id}"));
+    let group_directory = directory.join(format!("ScreenHarbor-{id}"));
     fs::create_dir(&group_directory)
         .map_err(|error| format!("failed to create recording group: {error}"))?;
     Ok((
@@ -2188,7 +2202,7 @@ fn validate_recording_directory(directory: &std::path::Path) -> Result<PathBuf, 
         .open(&probe)
         .map_err(|error| format!("recording directory is not writable: {error}"))?;
     let probe_result = file
-        .write_all(b"FrameFlow storage probe")
+        .write_all(b"ScreenHarbor storage probe")
         .and_then(|_| file.sync_all());
     drop(file);
     let cleanup_result = fs::remove_file(&probe);
@@ -2505,7 +2519,7 @@ pub fn run() {
             request_stop_capture
         ])
         .run(tauri::generate_context!())
-        .expect("failed to run FrameFlow");
+        .expect("failed to run ScreenHarbor");
 }
 
 #[cfg(test)]
@@ -2683,7 +2697,7 @@ mod tests {
         fs::create_dir_all(&directory).unwrap();
 
         let (temporary, output) = allocate_recording_paths_in(&directory, "1700000000009").unwrap();
-        let group = directory.join("FrameFlow-1700000000009");
+        let group = directory.join("ScreenHarbor-1700000000009");
         assert_eq!(temporary, group.join("main.mp4.part"));
         assert_eq!(output, group.join("main.mp4"));
         assert!(group.is_dir());

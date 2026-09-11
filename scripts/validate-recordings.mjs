@@ -4,7 +4,10 @@ import { homedir } from "node:os";
 import { extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const DEFAULT_DIRECTORY = join(homedir(), "Videos", "FrameFlow");
+const DEFAULT_DIRECTORIES = [
+  join(homedir(), "Videos", "ScreenHarbor"),
+  join(homedir(), "Videos", "FrameFlow"),
+];
 
 export function parseRate(value) {
   if (typeof value !== "string") return Number.NaN;
@@ -193,8 +196,9 @@ function collectMp4Files(directory) {
 
 export function resolveInputFiles(files, options) {
   if (files.length > 0) return files;
-  const directory = options.directory ?? DEFAULT_DIRECTORY;
-  return collectMp4Files(directory)
+  const directories = options.directory ? [options.directory] : DEFAULT_DIRECTORIES;
+  return directories
+    .flatMap((directory) => collectMp4Files(directory))
     .map((path) => ({ path, modified: statSync(path).mtimeMs }))
     .sort((left, right) => right.modified - left.modified)
     .slice(0, options.latest)
@@ -222,7 +226,7 @@ function probeFile(path, ffprobe) {
 function usage() {
   return `用法：npm run validate:recordings -- -- [文件...] [选项]
 
-未指定文件时，默认检查 ~/Videos/FrameFlow 中最近两段 MP4。
+未指定文件时，默认检查 ~/Videos/ScreenHarbor 和旧版 ~/Videos/FrameFlow 中最近两段 MP4。
 
   --directory DIR              从指定目录递归寻找成片
   --latest N                   自动选择最近 N 段，默认 2

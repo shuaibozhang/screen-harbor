@@ -37,6 +37,6 @@ fn main() {
             std::process::exit(1);
         }
     } else {
-        frameflow_lib::run();
+        screenharbor_lib::run();
     }
 }

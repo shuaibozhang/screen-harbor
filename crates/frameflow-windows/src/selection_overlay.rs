@@ -601,7 +601,7 @@ unsafe fn create_overlay_window(
     let hwnd = CreateWindowExW(
         WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
         PCWSTR(class_name.as_ptr()),
-        w!("FrameFlow 区域选择"),
+        w!("ScreenHarbor 区域选择"),
         WS_POPUP,
         bounds.x,
         bounds.y,
@@ -651,7 +651,7 @@ unsafe fn create_preview_windows(display: PhysicalRect) -> Result<PreviewResourc
         let hwnd = CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
             PCWSTR(class_name.as_ptr()),
-            w!("FrameFlow 选区预览"),
+            w!("ScreenHarbor 选区预览"),
             WS_POPUP,
             display.x,
             display.y,
@@ -693,7 +693,7 @@ unsafe fn create_mask_windows(display: PhysicalRect) -> Result<MaskResources, Pl
         let hwnd = CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
             PCWSTR(class_name.as_ptr()),
-            w!("FrameFlow 框选遮罩"),
+            w!("ScreenHarbor 框选遮罩"),
             WS_POPUP,
             display.x,
             display.y,
@@ -902,7 +902,7 @@ unsafe fn create_border_windows(
         let hwnd = CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             PCWSTR(class_name.as_ptr()),
-            w!("FrameFlow 录制边框"),
+            w!("ScreenHarbor 录制边框"),
             WS_POPUP,
             left,
             top,
