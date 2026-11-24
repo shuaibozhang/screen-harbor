@@ -6,6 +6,15 @@ const STORAGE_KEY = "screenharbor.locale";
 const LOCALE_EVENT = "screenharbor:locale-changed";
 
 const english: Record<string, string> = {
+  "保留原始分辨率": "Preserves the original resolution",
+  "主视频": "Main video", "主视频输出": "Main video output",
+  "视频格式": "Video format", "视频画质": "Video quality",
+  "低画质": "Low", "平衡": "Balanced", "高画质": "High",
+  "兼容常见设备和播放器": "Compatible with common devices and players",
+  "适合网页播放，录制结束后需要额外处理时间": "For web playback; takes extra processing time after recording",
+  "文件更小，适合快速分享": "Smaller files for quick sharing",
+  "兼顾清晰度与文件大小，适合日常网页使用": "Balances clarity and file size for everyday web use",
+  "优先保留细节，文件更大": "Preserves more detail with larger files",
   "正在准备 ScreenHarbor…": "Preparing ScreenHarbor…",
   "ScreenHarbor 初始化失败": "ScreenHarbor failed to initialize",
   "无法读取应用状态。": "Unable to read the app state.",

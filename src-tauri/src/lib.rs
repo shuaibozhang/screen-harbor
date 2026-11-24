@@ -21,10 +21,10 @@ use capture_display::{choose_reference_display, ordered_displays};
 use frameflow_capture::{DisplayInfo, PhysicalRect, RegionSelection};
 use frameflow_core::{
     OutputConfig, OutputFormat, OutputResolution, RecordingAction, RecordingState,
-    RecordingStateMachine, Resolution,
+    RecordingStateMachine, Resolution, VideoQuality,
 };
 use frameflow_media::{
-    CoverJob, CoverOutput, MediaJob, MediaWorkerClient, PreviewFormat, PreviewJob,
+    CoverJob, CoverOutput, MainWebmJob, MediaJob, MediaWorkerClient, PreviewFormat, PreviewJob,
 };
 use frameflow_recorder::{
     AudioInputConfig, AudioInputSource, CaptureEngineEvent, CaptureOutputSize, CaptureStats,
@@ -189,6 +189,8 @@ struct AppSnapshot {
     output_summary: String,
     capture_fps: u16,
     output_resolution: OutputResolution,
+    main_format: OutputFormat,
+    main_quality: VideoQuality,
     preview_enabled: bool,
     preview_format: OutputFormat,
     preview_resolution: OutputResolution,
@@ -389,10 +391,22 @@ fn get_app_snapshot(
         (false, true) => "麦克风",
         (false, false) => "无音频",
     };
-    let codec_label = if audio_config.system_audio || audio_config.microphone {
-        "H.264/AAC"
-    } else {
-        "H.264"
+    let main_format = output_config.main.format;
+    let main_quality = output_config.main.quality;
+    let main_format_label = output_format_label(main_format);
+    let quality_label = match main_quality {
+        VideoQuality::Low => "低画质",
+        VideoQuality::Balanced => "平衡",
+        VideoQuality::High => "高画质",
+    };
+    let codec_label = match (
+        main_format,
+        audio_config.system_audio || audio_config.microphone,
+    ) {
+        (OutputFormat::Webm, true) => "VP9/Opus",
+        (OutputFormat::Webm, false) => "VP9",
+        (_, true) => "H.264/AAC",
+        (_, false) => "H.264",
     };
 
     Ok(AppSnapshot {
@@ -414,7 +428,7 @@ fn get_app_snapshot(
         ),
         output_summary: if preview_enabled {
             format!(
-                "母版 MP4 · {codec_label} · {} · {capture_fps} FPS · {audio_label} / 预览 {} · {} · {} FPS",
+                "母版 {main_format_label} · {codec_label} · {quality_label} · {} · {capture_fps} FPS · {audio_label} / 预览 {} · {} · {} FPS",
                 output_resolution_label(output_resolution),
                 output_format_label(preview.format),
                 output_resolution_label(preview.resolution),
@@ -422,12 +436,14 @@ fn get_app_snapshot(
             )
         } else {
             format!(
-                "母版 MP4 · {codec_label} · {} · {capture_fps} FPS · {audio_label} / 不生成轻量预览和封面",
+                "母版 {main_format_label} · {codec_label} · {quality_label} · {} · {capture_fps} FPS · {audio_label} / 不生成轻量预览和封面",
                 output_resolution_label(output_resolution),
             )
         },
         capture_fps,
         output_resolution,
+        main_format,
+        main_quality,
         preview_enabled,
         preview_format: preview.format,
         preview_resolution: preview.resolution,
@@ -800,11 +816,14 @@ fn preview_profile(config: &OutputConfig) -> Option<PreviewProfile> {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn set_output_settings(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     fps: u16,
     resolution: OutputResolution,
+    main_format: OutputFormat,
+    main_quality: VideoQuality,
     preview_format: OutputFormat,
     preview_resolution: OutputResolution,
     preview_fps: u16,
@@ -852,6 +871,11 @@ fn set_output_settings(
         .lock()
         .map_err(|_| "output settings are unavailable".to_owned())?
         .clone();
+    if !matches!(main_format, OutputFormat::Mp4 | OutputFormat::Webm) {
+        return Err("main format must be MP4 or WebM".to_owned());
+    }
+    next.main.format = main_format;
+    next.main.quality = main_quality;
     next.main.fps = fps;
     next.main.resolution = resolution;
     if let Some(preview) = &mut next.preview {
@@ -1324,6 +1348,17 @@ fn start_capture(
         &temporary_path,
         &output_path,
         u32::from(capture_fps),
+        // Keep the intermediate high quality to avoid compounding compression for WebM.
+        if output_config.main.format == OutputFormat::Webm {
+            VideoQuality::High
+        } else {
+            output_config.main.quality
+        }
+        .target_bitrate(
+            output_size.width,
+            output_size.height,
+            u32::from(capture_fps),
+        ),
         audio_config,
         move |event| match event {
             CaptureEngineEvent::AudioWarning { .. } => {
@@ -1579,6 +1614,12 @@ fn cancel_storage_watchdog(state: &AppState) {
 }
 
 fn spawn_capture_finalizer(app: tauri::AppHandle, active: CaptureWorkerClient) {
+    let main_settings = app
+        .state::<AppState>()
+        .output_config
+        .lock()
+        .map(|config| config.main.clone())
+        .map_err(|_| "output settings are unavailable".to_owned());
     let (sender, receiver) = mpsc::sync_channel(1);
     thread::Builder::new()
         .name("frameflow-mp4-finalize".to_owned())
@@ -1597,6 +1638,39 @@ fn spawn_capture_finalizer(app: tauri::AppHandle, active: CaptureWorkerClient) {
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => Err("MP4 收尾线程意外退出".to_owned()),
             };
+            let result = result.and_then(|mut finalized| {
+                let settings = main_settings?;
+                if settings.format == OutputFormat::Webm {
+                    // This conversion runs after capture has stopped, outside the MP4 timeout.
+                    let source = finalized.output_path.clone();
+                    MediaWorkerClient::run(MediaJob::MainWebm(MainWebmJob {
+                        input_path: source.clone(),
+                        width: finalized.output_size.width,
+                        height: finalized.output_size.height,
+                        frames_per_second: finalized.frames_per_second as u16,
+                        video_bitrate: settings.quality.target_bitrate(
+                            finalized.output_size.width,
+                            finalized.output_size.height,
+                            finalized.frames_per_second,
+                        ),
+                    }))
+                    .map_err(|error| {
+                        format!(
+                            "WebM 转换失败，原始 MP4 已保留在 {}：{error}",
+                            source.display()
+                        )
+                    })?;
+                    finalized.output_path = source.with_file_name("main.webm");
+                    // Only remove our intermediate after the WebM file is published.
+                    if let Err(error) = fs::remove_file(&source) {
+                        eprintln!(
+                            "failed to remove WebM intermediate {}: {error}",
+                            source.display()
+                        );
+                    }
+                }
+                Ok(finalized)
+            });
             complete_finalization(&app, result);
         })
         .expect("failed to start finalization coordinator");
@@ -2049,6 +2123,9 @@ fn load_output_config(app: &tauri::AppHandle) -> OutputConfig {
 
 fn normalize_loaded_output_config(config: OutputConfig) -> OutputConfig {
     let mut config = config;
+    if !matches!(config.main.format, OutputFormat::Mp4 | OutputFormat::Webm) {
+        config.main.format = OutputFormat::Mp4;
+    }
     if config.preview.is_none() && config.cover_enabled {
         config.preview = OutputConfig::default().preview;
     }
@@ -2605,6 +2682,21 @@ mod tests {
             normalize_loaded_output_config(config).main.resolution,
             OutputResolution::Native
         );
+    }
+
+    #[test]
+    fn main_quality_and_webm_settings_survive_persistence_and_legacy_files() {
+        let mut config = OutputConfig::default();
+        config.main.format = OutputFormat::Webm;
+        config.main.quality = VideoQuality::Low;
+        let saved = serde_json::to_vec(&config).unwrap();
+        let loaded = normalize_loaded_output_config(serde_json::from_slice(&saved).unwrap());
+        assert_eq!(loaded.main.format, OutputFormat::Webm);
+        assert_eq!(loaded.main.quality, VideoQuality::Low);
+        let mut legacy = serde_json::to_value(&config).unwrap();
+        legacy["main"].as_object_mut().unwrap().remove("quality");
+        let loaded: OutputConfig = serde_json::from_value(legacy).unwrap();
+        assert_eq!(loaded.main.quality, VideoQuality::Balanced);
     }
 
     #[test]

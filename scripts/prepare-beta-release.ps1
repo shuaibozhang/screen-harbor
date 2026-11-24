@@ -73,7 +73,15 @@ try {
     $releaseInstaller = Join-Path $releaseDirectory $installer.Name
     Copy-Item -LiteralPath $installer.FullName -Destination $releaseInstaller -Force
 
-    $hash = (Get-FileHash -LiteralPath $releaseInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
+    $hashStream = [System.IO.File]::OpenRead($releaseInstaller)
+    $hashAlgorithm = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = [BitConverter]::ToString($hashAlgorithm.ComputeHash($hashStream)).Replace("-", "").ToLowerInvariant()
+    }
+    finally {
+        $hashStream.Dispose()
+        $hashAlgorithm.Dispose()
+    }
     $checksumPath = "$releaseInstaller.sha256"
     Set-Content -LiteralPath $checksumPath -Value "$hash  $($installer.Name)" -Encoding ascii
 

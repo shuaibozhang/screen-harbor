@@ -5,6 +5,7 @@ export type OutputResolution =
 
 export interface OutputSettings {
   format: OutputFormat;
+  quality?: "low" | "balanced" | "high";
   resolution: OutputResolution;
   fps: number;
   includeAudio: boolean;

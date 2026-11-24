@@ -146,7 +146,7 @@ button.row:hover { border-color: #ccd4e4; background: #fbfcfe; }
 .settings-section > h3 { margin: 0 0 22px; color: #2f3832; font-size: 15px; font-weight: 650; letter-spacing: -.01em; }
 .preview-settings-section { padding-top: 32px; }
 .settings-grid { display: grid; align-items: start; }
-.master-settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 54px; }
+.master-settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px 54px; }
 .preview-settings-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 28px; }
 .settings-field { min-width: 0; }
 .settings-field-label { display: flex; gap: 9px; align-items: center; margin-bottom: 14px; color: #343d37; font-size: 11px; font-weight: 620; }

@@ -10,6 +10,27 @@ pub enum OutputFormat {
     AnimatedAvif,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoQuality {
+    Low,
+    #[default]
+    Balanced,
+    High,
+}
+
+impl VideoQuality {
+    pub fn target_bitrate(self, width: u32, height: u32, fps: u32) -> u32 {
+        let pixels = u64::from(width) * u64::from(height) * u64::from(fps);
+        let (divisor, minimum, maximum) = match self {
+            Self::Low => (30, 500_000, 8_000_000),
+            Self::Balanced => (15, 1_000_000, 16_000_000),
+            Self::High => (6, 2_000_000, 24_000_000),
+        };
+        (pixels / divisor).clamp(minimum, maximum) as u32
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Resolution {
     pub width: u32,
@@ -80,6 +101,8 @@ impl OutputResolution {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutputSettings {
+    #[serde(default)]
+    pub quality: VideoQuality,
     pub format: OutputFormat,
     #[serde(default)]
     pub resolution: OutputResolution,
@@ -114,12 +137,14 @@ impl Default for OutputConfig {
         Self {
             main: OutputSettings {
                 format: OutputFormat::Mp4,
+                quality: VideoQuality::Balanced,
                 resolution: OutputResolution::Native,
                 fps: 30,
                 include_audio: true,
             },
             preview: Some(OutputSettings {
                 format: OutputFormat::Mp4,
+                quality: VideoQuality::Balanced,
                 resolution: OutputResolution::FitWithin {
                     width: 854,
                     height: 480,
@@ -135,6 +160,32 @@ impl Default for OutputConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quality_profiles_scale_with_resolution_and_keep_distinct_bounds() {
+        assert_eq!(VideoQuality::default(), VideoQuality::Balanced);
+        for (width, height, fps) in [
+            (320, 240, 24),
+            (1280, 720, 30),
+            (1920, 1080, 60),
+            (7680, 4320, 60),
+        ] {
+            let low = VideoQuality::Low.target_bitrate(width, height, fps);
+            let balanced = VideoQuality::Balanced.target_bitrate(width, height, fps);
+            let high = VideoQuality::High.target_bitrate(width, height, fps);
+            assert!(low < balanced && balanced < high);
+            assert!((500_000..=24_000_000).contains(&low));
+            assert!((500_000..=24_000_000).contains(&high));
+        }
+        assert_eq!(
+            VideoQuality::Balanced.target_bitrate(1920, 1080, 30),
+            4_147_200
+        );
+        assert_eq!(
+            VideoQuality::High.target_bitrate(1920, 1080, 30),
+            10_368_000
+        );
+    }
 
     #[test]
     fn animated_previews_never_contain_audio() {

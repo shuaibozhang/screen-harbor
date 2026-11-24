@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AppSnapshot, OutputFormat, OutputResolution } from "./domain";
+import type { AppSnapshot, MainFormat, VideoQuality, OutputFormat, OutputResolution } from "./domain";
 
 const developmentSnapshot: AppSnapshot = {
   recordingState: "idle",
@@ -26,6 +26,8 @@ const developmentSnapshot: AppSnapshot = {
   },
   outputSummary: "母版 MP4 · H.264/AAC · 原始分辨率 · 30 FPS · 系统声 / 预览 WebM · 最高 854×480 · 15 FPS",
   captureFps: 30,
+  mainFormat: "mp4",
+  mainQuality: "balanced",
   outputResolution: { mode: "native" },
   previewEnabled: true,
   previewFormat: "webm",
@@ -61,11 +63,15 @@ export async function setOutputSettings(
   previewFormat: OutputFormat,
   previewResolution: OutputResolution,
   previewFps: number,
+  mainFormat: MainFormat,
+  mainQuality: VideoQuality,
 ): Promise<void> {
   if (isTauriRuntime()) {
-    await invoke("set_output_settings", { fps, resolution, previewFormat, previewResolution, previewFps });
+    await invoke("set_output_settings", { fps, resolution, previewFormat, previewResolution, previewFps, mainFormat, mainQuality });
     return;
   }
+  developmentSnapshot.mainFormat = mainFormat;
+  developmentSnapshot.mainQuality = mainQuality;
   developmentSnapshot.captureFps = fps;
   developmentSnapshot.outputResolution = resolution;
   developmentSnapshot.previewFormat = previewFormat;

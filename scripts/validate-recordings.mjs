@@ -23,6 +23,9 @@ export function validateProbe(probe, options = {}) {
   const audio = streams.find((stream) => stream.codec_type === "audio");
   const audioPackets = Array.isArray(probe?.audioPackets) ? probe.audioPackets : undefined;
   const duration = Number(format.duration ?? video?.duration);
+  const webm = String(format.format_name ?? "").split(",").includes("webm");
+  const expectedVideoCodec = webm ? "vp9" : "h264";
+  const expectedAudioCodec = webm ? "opus" : "aac";
   let maximumAudioPacketDurationMs;
   let maximumAudioGapMs;
   let audioVideoDriftMs;
@@ -30,7 +33,7 @@ export function validateProbe(probe, options = {}) {
   if (!video) {
     failures.push("缺少视频轨");
   } else {
-    if (video.codec_name !== "h264") failures.push(`视频编码为 ${video.codec_name ?? "未知"}，期望 h264`);
+    if (video.codec_name !== expectedVideoCodec) failures.push(`视频编码为 ${video.codec_name ?? "未知"}，期望 ${expectedVideoCodec}`);
     if (options.width && Number(video.width) !== options.width) failures.push(`宽度为 ${video.width}，期望 ${options.width} 物理像素`);
     if (options.height && Number(video.height) !== options.height) failures.push(`高度为 ${video.height}，期望 ${options.height} 物理像素`);
 
@@ -65,12 +68,12 @@ export function validateProbe(probe, options = {}) {
   if (options.audio === "required" && !audio) failures.push("缺少音轨");
   if (options.audio === "forbidden" && audio) failures.push("存在未预期的音轨");
   if (audio) {
-    if (audio.codec_name !== "aac") failures.push(`音频编码为 ${audio.codec_name ?? "未知"}，期望 aac`);
+    if (audio.codec_name !== expectedAudioCodec) failures.push(`音频编码为 ${audio.codec_name ?? "未知"}，期望 ${expectedAudioCodec}`);
     if (Number(audio.sample_rate) !== 48_000) failures.push(`音频采样率为 ${audio.sample_rate ?? "未知"} Hz，期望 48000 Hz`);
     if (Number(audio.channels) !== 2) failures.push(`音频声道数为 ${audio.channels ?? "未知"}，期望 2`);
     if (audioPackets) {
       if (audioPackets.length === 0) {
-        failures.push("音轨不包含可读取的 AAC 数据包");
+        failures.push("音轨不包含可读取的音频数据包");
       } else {
         let maximumDuration = 0;
         let maximumGap = 0;
@@ -183,13 +186,13 @@ export function parseArguments(argv) {
   return { files, options };
 }
 
-function collectMp4Files(directory) {
+function collectVideoFiles(directory) {
   if (!existsSync(directory)) return [];
   const files = [];
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     const path = join(directory, entry.name);
-    if (entry.isDirectory()) files.push(...collectMp4Files(path));
-    else if (entry.isFile() && extname(entry.name).toLowerCase() === ".mp4") files.push(path);
+    if (entry.isDirectory()) files.push(...collectVideoFiles(path));
+    else if (entry.isFile() && [".mp4", ".webm"].includes(extname(entry.name).toLowerCase())) files.push(path);
   }
   return files;
 }
@@ -198,7 +201,7 @@ export function resolveInputFiles(files, options) {
   if (files.length > 0) return files;
   const directories = options.directory ? [options.directory] : DEFAULT_DIRECTORIES;
   return directories
-    .flatMap((directory) => collectMp4Files(directory))
+    .flatMap((directory) => collectVideoFiles(directory))
     .map((path) => ({ path, modified: statSync(path).mtimeMs }))
     .sort((left, right) => right.modified - left.modified)
     .slice(0, options.latest)
@@ -226,7 +229,7 @@ function probeFile(path, ffprobe) {
 function usage() {
   return `用法：npm run validate:recordings -- -- [文件...] [选项]
 
-未指定文件时，默认检查 ~/Videos/ScreenHarbor 和旧版 ~/Videos/FrameFlow 中最近两段 MP4。
+未指定文件时，默认检查 ~/Videos/ScreenHarbor 和旧版 ~/Videos/FrameFlow 中最近两段 MP4 / WebM。
 
   --directory DIR              从指定目录递归寻找成片
   --latest N                   自动选择最近 N 段，默认 2

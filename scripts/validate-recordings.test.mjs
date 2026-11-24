@@ -85,3 +85,17 @@ test("parses explicit validation expectations", () => {
   assert.equal(options.duration, 8);
   assert.equal(options.audio, "required");
 });
+
+
+test("accepts VP9/Opus WebM and rejects a mismatched audio codec", () => {
+  const probe = {
+    format: { format_name: "matroska,webm", duration: "2.0" },
+    streams: [
+      { codec_type: "video", codec_name: "vp9", width: 640, height: 360, r_frame_rate: "30/1", avg_frame_rate: "30/1" },
+      { codec_type: "audio", codec_name: "opus", sample_rate: "48000", channels: 2 },
+    ],
+  };
+  assert.deepEqual(validateProbe(probe).failures, []);
+  probe.streams[1].codec_name = "aac";
+  assert.equal(validateProbe(probe).failures.length, 1);
+});

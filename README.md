@@ -8,7 +8,8 @@ ScreenHarbor is a lightweight, local-first screen recorder for Windows. It focus
 
 - 智能识别窗口，也可以拖动自由框选录制区域。
 - 同时录制麦克风和系统声音，并可在录制过程中静音。
-- 输出 H.264/AAC MP4 高清母版。
+- 主视频可选 MP4（H.264/AAC）或 WebM（VP9/Opus），画质提供低画质、平衡（默认）、高画质三档。
+- 画质会根据分辨率和帧率自动调整码率；WebM 在录制结束后转换，转换失败时保留原始 MP4。
 - 可同时生成 MP4、WebM 或动态 WebP 轻量预览及双尺寸 WebP 封面。
 - 支持开始倒计时、暂停/继续、多个显示器和高 DPI 缩放。
 - 录制内容、设置和索引均保存在本地，不要求登录。

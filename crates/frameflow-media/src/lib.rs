@@ -9,7 +9,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-const MEDIA_WORKER_PROTOCOL_VERSION: u16 = 4;
+const MEDIA_WORKER_PROTOCOL_VERSION: u16 = 5;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -63,6 +63,7 @@ pub struct CoverOutput {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", content = "job", rename_all = "snake_case")]
 pub enum MediaJob {
+    MainWebm(MainWebmJob),
     Preview(PreviewJob),
     Cover(CoverJob),
 }
@@ -164,9 +165,101 @@ pub fn run_media_worker_stdio() -> Result<(), String> {
 
 pub fn run_media_job(job: &MediaJob) -> Result<(), String> {
     match job {
+        MediaJob::MainWebm(job) => run_main_webm_job(job),
         MediaJob::Preview(job) => run_preview_job(job),
         MediaJob::Cover(job) => run_cover_job(job),
     }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MainWebmJob {
+    pub input_path: PathBuf,
+    pub width: u32,
+    pub height: u32,
+    pub frames_per_second: u16,
+    pub video_bitrate: u32,
+}
+
+fn main_webm_arguments(job: &MainWebmJob) -> Vec<OsString> {
+    vec![
+        "-y".into(),
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-i".into(),
+        job.input_path.as_os_str().to_owned(),
+        "-map".into(),
+        "0:v:0".into(),
+        "-map".into(),
+        "0:a:0?".into(),
+        "-r".into(),
+        job.frames_per_second.to_string().into(),
+        "-fps_mode".into(),
+        "cfr".into(),
+        "-c:v".into(),
+        "libvpx-vp9".into(),
+        "-b:v".into(),
+        job.video_bitrate.to_string().into(),
+        "-deadline".into(),
+        "good".into(),
+        "-cpu-used".into(),
+        "4".into(),
+        "-row-mt".into(),
+        "1".into(),
+        "-threads".into(),
+        "4".into(),
+        "-pix_fmt".into(),
+        "yuv420p".into(),
+        "-c:a".into(),
+        "libopus".into(),
+        "-b:a".into(),
+        "128k".into(),
+        "-f".into(),
+        "webm".into(),
+        job.input_path
+            .with_file_name("main.webm.part")
+            .into_os_string(),
+    ]
+}
+
+fn run_main_webm_job(job: &MainWebmJob) -> Result<(), String> {
+    if job.input_path.file_name().and_then(|name| name.to_str()) != Some("main.mp4")
+        || !job.input_path.is_file()
+        || job.width < 2
+        || job.height < 2
+        || !(1..=60).contains(&job.frames_per_second)
+        || !(500_000..=24_000_000).contains(&job.video_bitrate)
+    {
+        return Err("invalid main WebM job".to_owned());
+    }
+    let temporary = job.input_path.with_file_name("main.webm.part");
+    let output_path = job.input_path.with_file_name("main.webm");
+    if output_path.exists() {
+        return Err("main WebM output already exists".to_owned());
+    }
+    let mut command = Command::new(resolve_ffmpeg()?);
+    command.args(main_webm_arguments(job));
+    hide_console_window(&mut command);
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to start WebM encoder: {error}"))?;
+    if !output.status.success() {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!(
+            "WebM encoder failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    if fs::metadata(&temporary)
+        .map_err(|error| error.to_string())?
+        .len()
+        == 0
+    {
+        let _ = fs::remove_file(&temporary);
+        return Err("WebM encoder created an empty file".to_owned());
+    }
+    publish_file(&temporary, &output_path)
 }
 
 pub fn run_preview_job(job: &PreviewJob) -> Result<(), String> {
@@ -580,6 +673,101 @@ fn hide_console_window(_command: &mut Command) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires FRAMEFLOW_FFMPEG with h264_mf, VP9 and Opus encoders"]
+    fn real_main_webm_round_trip_with_and_without_audio() {
+        let ffmpeg = resolve_ffmpeg().unwrap();
+        let root = env::temp_dir().join(format!(
+            "screenharbor-webm-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        for (name, audio) in [("with-audio", true), ("silent", false)] {
+            let directory = root.join(name);
+            fs::create_dir(&directory).unwrap();
+            let input = directory.join("main.mp4");
+            let mut command = Command::new(&ffmpeg);
+            command.args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=640x360:rate=30",
+            ]);
+            if audio {
+                command.args([
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:sample_rate=48000",
+                    "-ac",
+                    "2",
+                    "-c:a",
+                    "aac_mf",
+                ]);
+            }
+            command
+                .args(["-t", "2", "-c:v", "h264_mf", "-b:v", "2000000"])
+                .arg(&input);
+            hide_console_window(&mut command);
+            let encoded = command.output().unwrap();
+            assert!(
+                encoded.status.success(),
+                "{}",
+                String::from_utf8_lossy(&encoded.stderr)
+            );
+            let source_bytes = fs::read(&input).unwrap();
+            let job = MainWebmJob {
+                input_path: input.clone(),
+                width: 640,
+                height: 360,
+                frames_per_second: 30,
+                video_bitrate: 1_000_000,
+            };
+            run_media_job(&MediaJob::MainWebm(job.clone())).unwrap();
+            let output = input.with_file_name("main.webm");
+            assert!(output.is_file());
+            assert!(!input.with_file_name("main.webm.part").exists());
+            assert_eq!(fs::read(&input).unwrap(), source_bytes);
+            let published = fs::read(&output).unwrap();
+            assert!(run_media_job(&MediaJob::MainWebm(job)).is_err());
+            assert_eq!(fs::read(&output).unwrap(), published);
+            let mut decode = Command::new(&ffmpeg);
+            decode
+                .args(["-hide_banner", "-i"])
+                .arg(&output)
+                .args(["-f", "null", "-"]);
+            hide_console_window(&mut decode);
+            let decoded = decode.output().unwrap();
+            let info = String::from_utf8_lossy(&decoded.stderr);
+            assert!(decoded.status.success(), "{info}");
+            assert!(
+                info.contains("Video: vp9") && info.contains("640x360") && info.contains("30 fps"),
+                "{info}"
+            );
+            assert_eq!(info.contains("Audio: opus"), audio, "{info}");
+            run_preview_job(&PreviewJob {
+                input_path: output,
+                temporary_path: directory.join("preview.webm.part"),
+                output_path: directory.join("preview.webm"),
+                format: PreviewFormat::Webm,
+                maximum_width: 320,
+                maximum_height: 180,
+                frames_per_second: 15,
+                include_audio: true,
+            })
+            .unwrap();
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn preview_arguments_use_media_foundation_and_a_bounded_even_scale() {

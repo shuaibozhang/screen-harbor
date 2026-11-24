@@ -26,6 +26,7 @@ pub(crate) struct RecordingSummary {
     pub(crate) duration_seconds: Option<u64>,
     pub(crate) created_label: String,
     pub(crate) main_status: OutputStatus,
+    pub(crate) main_format: String,
     pub(crate) preview_status: OutputStatus,
     pub(crate) cover_status: OutputStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -555,7 +556,7 @@ impl RecordingIndex {
         cover_enabled: bool,
     ) -> Result<String, String> {
         let mut recording = inspect_recording(output_path)?
-            .ok_or_else(|| "finalized recording is not a readable MP4".to_owned())?;
+            .ok_or_else(|| "finalized recording is not a readable MP4 or WebM".to_owned())?;
         let duration_ms = duration.as_millis().min(u128::from(u64::MAX)) as u64;
         recording.duration_ms = Some(duration_ms);
         if is_group_main(output_path) {
@@ -805,7 +806,7 @@ impl RecordingIndex {
             preview_output_path,
             high_temporary_path: high_output_path.with_extension("webp.part"),
             high_output_path,
-            position_ms: (manifest.duration_ms / 10).min(1_000),
+            position_ms: 0,
             source_resolution,
         })
     }
@@ -933,7 +934,7 @@ impl RecordingIndex {
             let mut statement = connection
                 .prepare(
                     "SELECT id, display_name, duration_ms, created_at_ms,
-                            main_status, preview_status, manifest_path
+                            main_status, preview_status, manifest_path, main_path
                      FROM recordings
                      ORDER BY created_at_ms DESC
                      LIMIT ?1",
@@ -969,6 +970,11 @@ impl RecordingIndex {
                         duration_seconds: duration_ms.map(|value| value.max(0) as u64 / 1_000),
                         created_label: created_label(created_at_ms),
                         main_status: OutputStatus::from_database(&row.get::<_, String>(4)?),
+                        main_format: Path::new(&row.get::<_, String>(7)?)
+                            .extension()
+                            .and_then(|ext| ext.to_str())
+                            .unwrap_or("mp4")
+                            .to_ascii_lowercase(),
                         preview_status: OutputStatus::from_database(&row.get::<_, String>(5)?),
                         cover_status,
                         cover_path,
@@ -1311,7 +1317,10 @@ fn discover_recordings(directory: &Path) -> Result<Vec<DiscoveredRecording>, Str
                     .path()
                     .extension()
                     .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
+                    .is_some_and(|extension| {
+                        extension.eq_ignore_ascii_case("mp4")
+                            || extension.eq_ignore_ascii_case("webm")
+                    })
                 {
                     video_paths.push(entry.path());
                 }
@@ -1334,7 +1343,14 @@ fn discover_recordings(directory: &Path) -> Result<Vec<DiscoveredRecording>, Str
         }
     }
     for video_path in video_paths {
-        if grouped_main_paths.contains(&video_path) || is_preview_artifact(&video_path) {
+        let retained_intermediate = video_path.file_name().and_then(|name| name.to_str())
+            == Some("main.mp4")
+            && video_path.with_file_name("main.webm").is_file()
+            && has_video_header(&video_path.with_file_name("main.webm"))?;
+        if retained_intermediate
+            || grouped_main_paths.contains(&video_path)
+            || is_preview_artifact(&video_path)
+        {
             continue;
         }
         if let Ok(Some(recording)) = inspect_recording(&video_path) {
@@ -1348,8 +1364,10 @@ fn inspect_recording(path: &Path) -> Result<Option<DiscoveredRecording>, String>
     if !path
         .extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
-        || !has_mp4_file_type_box(path)?
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("mp4") || extension.eq_ignore_ascii_case("webm")
+        })
+        || !has_video_header(path)?
     {
         return Ok(None);
     }
@@ -1374,7 +1392,11 @@ fn inspect_recording(path: &Path) -> Result<Option<DiscoveredRecording>, String>
         .map(|timestamp| timestamp.to_string())
         .unwrap_or_else(|| format!("import-{:016x}", stable_path_hash(path)));
     let name = if is_group_main(path) {
-        format!("ScreenHarbor-{id}.mp4")
+        let extension = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("mp4");
+        format!("ScreenHarbor-{id}.{extension}")
     } else {
         file_name
     };
@@ -1485,7 +1507,9 @@ fn replace_file(source: &Path, destination: &Path) -> Result<(), String> {
 fn is_group_main(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| name.eq_ignore_ascii_case("main.mp4"))
+        .is_some_and(|name| {
+            name.eq_ignore_ascii_case("main.mp4") || name.eq_ignore_ascii_case("main.webm")
+        })
         && group_id_from_main_path(path).is_some()
 }
 
@@ -1500,7 +1524,8 @@ fn is_preview_artifact(path: &Path) -> bool {
 }
 
 fn group_id_from_main_path(path: &Path) -> Option<String> {
-    if !path.file_name()?.to_str()?.eq_ignore_ascii_case("main.mp4") {
+    let name = path.file_name()?.to_str()?;
+    if !name.eq_ignore_ascii_case("main.mp4") && !name.eq_ignore_ascii_case("main.webm") {
         return None;
     }
     let group_name = path.parent()?.file_name()?.to_str()?;
@@ -1509,6 +1534,19 @@ fn group_id_from_main_path(path: &Path) -> Option<String> {
 
 fn recording_timestamp_from_group_id(id: &str) -> Option<u64> {
     id.parse().ok()
+}
+
+fn has_video_header(path: &Path) -> Result<bool, String> {
+    if path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("webm"))
+    {
+        let mut file = File::open(path).map_err(|error| error.to_string())?;
+        let mut header = [0_u8; 4];
+        return Ok(file.read_exact(&mut header).is_ok() && header == [0x1a, 0x45, 0xdf, 0xa3]);
+    }
+    has_mp4_file_type_box(path)
 }
 
 fn has_mp4_file_type_box(path: &Path) -> Result<bool, String> {
@@ -1520,7 +1558,8 @@ fn has_mp4_file_type_box(path: &Path) -> Result<bool, String> {
 
 fn recording_timestamp_from_name(name: &str) -> Option<u64> {
     strip_recording_prefix(name)?
-        .strip_suffix(".mp4")?
+        .strip_suffix(".mp4")
+        .or_else(|| name.strip_suffix(".webm"))?
         .parse()
         .ok()
 }
@@ -1653,6 +1692,38 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn webm_master_survives_reconciliation_and_supports_preview_and_deletion() {
+        let workspace = TestWorkspace::new("webm-master");
+        let intermediate = workspace.group_recording("1700000000109");
+        let main = intermediate.with_file_name("main.webm");
+        fs::write(&main, [0x1a, 0x45, 0xdf, 0xa3, 0, 0, 0, 0]).unwrap();
+        let index = workspace.index();
+        workspace.complete(&index, &main, Duration::from_secs(3));
+        drop(index);
+        let index = workspace.index();
+        index.reconcile().unwrap();
+        assert_eq!(index.recent(10).unwrap().len(), 1);
+        assert_eq!(index.recent(10).unwrap()[0].main_format, "webm");
+        assert_eq!(
+            index.recent(10).unwrap()[0].name,
+            "ScreenHarbor-1700000000109.webm"
+        );
+        let job = index.prepare_preview_for_path(&main).unwrap();
+        assert_eq!(job.input_path, main.canonicalize().unwrap());
+        assert_eq!(
+            index.path_for_id("1700000000109").unwrap(),
+            main.canonicalize().unwrap()
+        );
+        assert_eq!(
+            index
+                .deletion_targets(&["1700000000109".to_owned()])
+                .unwrap()[0]
+                .path,
+            main.parent().unwrap().canonicalize().unwrap()
+        );
     }
 
     #[test]
@@ -2060,7 +2131,7 @@ mod tests {
         index.finish_preview(&preview, Ok(())).unwrap();
         let cover = index.prepare_cover_for_id("1700000000012").unwrap();
         assert_eq!(cover.input_path, path.canonicalize().unwrap());
-        assert_eq!(cover.position_ms, 1_000);
+        assert_eq!(cover.position_ms, 0);
         assert_eq!(
             cover.source_resolution,
             Some(Resolution {

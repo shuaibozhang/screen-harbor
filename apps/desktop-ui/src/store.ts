@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { beginSelection, chooseSaveDirectory, getAppSnapshot, setAudioInput, setOutputSettings, setPreviewEnabled, setRecordingPreferences } from "./bridge";
-import type { AppSnapshot, OutputFormat, OutputResolution } from "./domain";
+import type { AppSnapshot, MainFormat, VideoQuality, OutputFormat, OutputResolution } from "./domain";
 import { currentLocale, translate } from "./i18n";
 
 const t = (source: string, values?: Record<string, string | number>) => translate(currentLocale(), source, values);
@@ -11,7 +11,7 @@ interface AppStore {
   error: string | null;
   hydrate: () => Promise<void>;
   startSelection: () => Promise<void>;
-  updateOutputSettings: (fps: number, resolution: OutputResolution, previewFormat: OutputFormat, previewResolution: OutputResolution, previewFps: number) => Promise<void>;
+  updateOutputSettings: (fps: number, resolution: OutputResolution, previewFormat: OutputFormat, previewResolution: OutputResolution, previewFps: number, mainFormat: MainFormat, mainQuality: VideoQuality) => Promise<void>;
   updateAudioInput: (source: "microphone" | "systemAudio", enabled: boolean, deviceId?: string) => Promise<void>;
   updatePreviewEnabled: (enabled: boolean) => Promise<void>;
   updateRecordingPreferences: (countdownEnabled: boolean, countdownSeconds: number) => Promise<void>;
@@ -39,9 +39,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
       set({ error: t("暂时无法进入框选，请稍后重试。") });
     }
   },
-  updateOutputSettings: async (fps, resolution, previewFormat, previewResolution, previewFps) => {
+  updateOutputSettings: async (fps, resolution, previewFormat, previewResolution, previewFps, mainFormat, mainQuality) => {
     try {
-      await setOutputSettings(fps, resolution, previewFormat, previewResolution, previewFps);
+      await setOutputSettings(fps, resolution, previewFormat, previewResolution, previewFps, mainFormat, mainQuality);
       set({ snapshot: await getAppSnapshot(), error: null });
     } catch (cause) {
       set({ error: t("无法保存输出设置：{error}", { error: String(cause) }) });

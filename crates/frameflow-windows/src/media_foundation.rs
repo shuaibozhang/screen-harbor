@@ -71,6 +71,7 @@ pub(crate) struct Mp4VideoConfig {
     pub(crate) output_width: u32,
     pub(crate) output_height: u32,
     pub(crate) frame_rate: u32,
+    pub(crate) bitrate: Option<u32>,
 }
 
 struct SampleTimeline {
@@ -160,7 +161,9 @@ impl Mp4Writer {
         unsafe {
             output.SetUINT32(
                 &MF_MT_AVG_BITRATE,
-                target_bitrate(video.output_width, video.output_height, video.frame_rate),
+                video.bitrate.unwrap_or_else(|| {
+                    target_bitrate(video.output_width, video.output_height, video.frame_rate)
+                }),
             )?
         };
         let video_stream = unsafe { sink.AddStream(&output)? };

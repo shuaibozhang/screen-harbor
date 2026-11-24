@@ -9,7 +9,7 @@ import { isTauriRuntime } from "./bridge";
 import { HomeScreen } from "./HomeScreen";
 import { useI18n } from "./i18n";
 import { useAppStore } from "./store";
-import type { DisplayChangeEvent, FinalizationEvent, InterruptedRecording, OutputFormat, OutputResolution, RecordingState } from "./domain";
+import type { DisplayChangeEvent, FinalizationEvent, InterruptedRecording, MainFormat, VideoQuality, OutputFormat, OutputResolution, RecordingState } from "./domain";
 import "./styles.css";
 
 type ResolutionChoice = "native" | "1080p" | "720p";
@@ -64,6 +64,8 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [draftFps, setDraftFps] = useState(30);
   const [draftResolution, setDraftResolution] = useState<ResolutionChoice>("native");
+  const [draftMainFormat, setDraftMainFormat] = useState<MainFormat>("mp4");
+  const [draftMainQuality, setDraftMainQuality] = useState<VideoQuality>("balanced");
   const [draftPreviewFormat, setDraftPreviewFormat] = useState<OutputFormat>("mp4");
   const [draftPreviewResolution, setDraftPreviewResolution] = useState<PreviewResolutionChoice>("480p");
   const [draftPreviewFps, setDraftPreviewFps] = useState(15);
@@ -166,6 +168,8 @@ export function App() {
   }
 
   const openSettings = () => {
+    setDraftMainFormat(snapshot.mainFormat);
+    setDraftMainQuality(snapshot.mainQuality);
     setDraftFps(snapshot.captureFps);
     const choice = resolutionChoice(snapshot.outputResolution);
     setDraftResolution(choice);
@@ -198,6 +202,8 @@ export function App() {
         draftPreviewFormat,
         previewResolution(draftPreviewResolution),
         draftPreviewFps,
+        draftMainFormat,
+        draftMainQuality,
       );
       await updateRecordingPreferences(draftCountdownEnabled, draftCountdownSeconds);
       setSettingsOpen(false);
@@ -212,7 +218,9 @@ export function App() {
     && draftFps > snapshot.monitorRefreshRateHz + 1;
   const draftOutputResolution = outputResolution(draftResolution);
   const draftPreviewOutputResolution = previewResolution(draftPreviewResolution);
-  const settingsUnchanged = draftFps === snapshot.captureFps
+  const settingsUnchanged = draftMainFormat === snapshot.mainFormat
+    && draftMainQuality === snapshot.mainQuality
+    && draftFps === snapshot.captureFps
     && sameResolution(draftOutputResolution, snapshot.outputResolution)
     && draftPreviewFormat === snapshot.previewFormat
     && sameResolution(draftPreviewOutputResolution, snapshot.previewResolution)
@@ -418,8 +426,26 @@ export function App() {
               </div>
 
               <section className="settings-section" aria-labelledby="master-settings-heading">
-                <h3 id="master-settings-heading">{t("母版输出")}</h3>
+                <h3 id="master-settings-heading">{t("主视频输出")}</h3>
                 <div className="settings-grid master-settings-grid">
+                  <div className="settings-field">
+                    <span className="settings-field-label" id="main-format-label">{t("视频格式")}</span>
+                    <div className="compact-options" role="radiogroup" aria-labelledby="main-format-label">
+                      {([['mp4', 'MP4'], ['webm', 'WebM']] as const).map(([value, label]) => (
+                        <button key={value} type="button" role="radio" aria-checked={draftMainFormat === value} className={draftMainFormat === value ? "selected" : ""} onClick={() => setDraftMainFormat(value)}>{label}</button>
+                      ))}
+                    </div>
+                    <small>{t(draftMainFormat === "mp4" ? "兼容常见设备和播放器" : "适合网页播放，录制结束后需要额外处理时间")}</small>
+                  </div>
+                  <div className="settings-field">
+                    <span className="settings-field-label" id="main-quality-label">{t("视频画质")}</span>
+                    <div className="compact-options" role="radiogroup" aria-labelledby="main-quality-label">
+                      {([['low', '低画质'], ['balanced', '平衡'], ['high', '高画质']] as const).map(([value, label]) => (
+                        <button key={value} type="button" role="radio" aria-checked={draftMainQuality === value} className={draftMainQuality === value ? "selected" : ""} onClick={() => setDraftMainQuality(value)}>{t(label)}</button>
+                      ))}
+                    </div>
+                    <small>{t(draftMainQuality === "low" ? "文件更小，适合快速分享" : draftMainQuality === "balanced" ? "兼顾清晰度与文件大小，适合日常网页使用" : "优先保留细节，文件更大")}</small>
+                  </div>
                   <div className="settings-field">
                     <span className="settings-field-label" id="output-resolution-label">{t("输出分辨率")}</span>
                     <div className="compact-options" role="radiogroup" aria-labelledby="output-resolution-label">
@@ -427,7 +453,7 @@ export function App() {
                         <button key={value} type="button" role="radio" aria-checked={draftResolution === value} className={draftResolution === value ? "selected" : ""} onClick={() => setDraftResolution(value)}>{t(label)}</button>
                       ))}
                     </div>
-                    <small>{draftResolution === "native" ? t("最佳画质") : t("最高 {size}", { size: draftResolution === "1080p" ? "1920×1080" : "1280×720" })}</small>
+                    <small>{draftResolution === "native" ? t("保留原始分辨率") : t("最高 {size}", { size: draftResolution === "1080p" ? "1920×1080" : "1280×720" })}</small>
                   </div>
                   <div className="settings-field">
                     <span className="settings-field-label" id="capture-fps-label">{t("录制帧率")}</span>

@@ -38,6 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &temporary,
         &output,
         60,
+        20_000_000,
         AudioInputConfig::default(),
         |event| eprintln!("capture event: {event:?}"),
     )?;

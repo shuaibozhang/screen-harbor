@@ -125,6 +125,7 @@ pub struct Mp4CaptureOptions {
     frames_per_second: u32,
     audio_enabled: bool,
     output_size: Option<(u32, u32)>,
+    video_bitrate: Option<u32>,
 }
 
 impl Mp4CaptureOptions {
@@ -136,11 +137,17 @@ impl Mp4CaptureOptions {
             frames_per_second,
             audio_enabled: false,
             output_size: None,
+            video_bitrate: None,
         })
     }
 
     pub fn frames_per_second(self) -> u32 {
         self.frames_per_second
+    }
+
+    pub fn with_video_bitrate(mut self, bitrate: u32) -> Self {
+        self.video_bitrate = Some(bitrate.clamp(500_000, 24_000_000));
+        self
     }
 
     pub fn with_audio(mut self, enabled: bool) -> Self {
@@ -171,6 +178,7 @@ impl Default for Mp4CaptureOptions {
             frames_per_second: 30,
             audio_enabled: false,
             output_size: None,
+            video_bitrate: None,
         }
     }
 }
@@ -437,6 +445,7 @@ impl MediaPipeline {
             output_width,
             output_height,
             frame_rate: output.options.frames_per_second(),
+            bitrate: output.options.video_bitrate,
         };
         let latest_frame = Arc::new(LatestValue::default());
         let worker_latest_frame = Arc::clone(&latest_frame);

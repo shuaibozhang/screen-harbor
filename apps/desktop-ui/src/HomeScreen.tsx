@@ -219,8 +219,8 @@ export function HomeScreen({
             <button className="preference-row preference-action" type="button" onClick={onOpenSettings}>
               <FileVideo2 size={27} strokeWidth={1.45} />
               <span className="preference-copy">
-                <strong>{t("高清母版")}</strong>
-                <small>MP4 · {resolutionLabel(snapshot.outputResolution, t)} · {snapshot.captureFps} FPS</small>
+                <strong>{t("主视频")}</strong>
+                <small>{formatLabel(snapshot.mainFormat)} · {t(snapshot.mainQuality === "low" ? "低画质" : snapshot.mainQuality === "high" ? "高画质" : "平衡")} · {resolutionLabel(snapshot.outputResolution, t)} · {snapshot.captureFps} FPS</small>
               </span>
               <ChevronDown size={17} />
             </button>
@@ -294,7 +294,7 @@ export function HomeScreen({
                     <span className="recording-meta">
                       <span><CalendarDays size={14} />{localizeRelativeTime(locale, recording.createdLabel)}</span>
                       <span><Clock3 size={14} />{formatDuration(recording.durationSeconds, t)}</span>
-                      <span><FileVideo2 size={14} />MP4</span>
+                      <span><FileVideo2 size={14} />{formatLabel(recording.mainFormat)}</span>
                     </span>
                     <small>{previewStatusLabel(recording.previewStatus, t)}</small>
                   </div>

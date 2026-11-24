@@ -11,6 +11,8 @@ export type RecordingState =
   | "failed";
 
 export type OutputStatus = "not_requested" | "pending" | "processing" | "completed" | "failed";
+export type MainFormat = "mp4" | "webm";
+export type VideoQuality = "low" | "balanced" | "high";
 export type OutputFormat = "mp4" | "webm" | "animated_webp";
 
 export interface RecentRecording {
@@ -19,6 +21,7 @@ export interface RecentRecording {
   durationSeconds?: number;
   createdLabel: string;
   mainStatus: OutputStatus;
+  mainFormat: MainFormat;
   previewStatus: OutputStatus;
   coverStatus: OutputStatus;
   coverPath?: string;
@@ -61,6 +64,8 @@ export interface AppSnapshot {
   systemAudio: AudioInputSnapshot;
   outputSummary: string;
   captureFps: number;
+  mainFormat: MainFormat;
+  mainQuality: VideoQuality;
   outputResolution: OutputResolution;
   previewEnabled: boolean;
   previewFormat: OutputFormat;

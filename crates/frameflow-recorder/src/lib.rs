@@ -27,7 +27,7 @@ use windows_sys::Win32::{
     },
 };
 
-pub const CAPTURE_WORKER_PROTOCOL_VERSION: u16 = 2;
+pub const CAPTURE_WORKER_PROTOCOL_VERSION: u16 = 3;
 const AUDIO_MIXER_TICK: Duration = Duration::from_millis(10);
 const AUDIO_RENDER_DELAY: Duration = Duration::from_millis(100);
 
@@ -172,6 +172,7 @@ pub enum CaptureWorkerCommand {
         temporary_path: PathBuf,
         output_path: PathBuf,
         frames_per_second: u32,
+        video_bitrate: u32,
         audio: AudioInputConfig,
     },
     Pause,
@@ -295,6 +296,7 @@ impl CaptureWorkerClient {
         temporary_path: impl AsRef<Path>,
         output_path: impl AsRef<Path>,
         frames_per_second: u32,
+        video_bitrate: u32,
         audio: AudioInputConfig,
         event_handler: impl Fn(CaptureEngineEvent) + Send + Sync + 'static,
     ) -> Result<Self, String> {
@@ -384,6 +386,7 @@ impl CaptureWorkerClient {
             temporary_path: temporary_path.as_ref().to_path_buf(),
             output_path: output_path.as_ref().to_path_buf(),
             frames_per_second,
+            video_bitrate,
             audio,
         })? {
             CaptureWorkerResult::Accepted => Ok(client),
@@ -757,6 +760,7 @@ where
             temporary_path,
             output_path,
             frames_per_second,
+            video_bitrate,
             audio,
         } => {
             if engine.is_some() {
@@ -768,6 +772,7 @@ where
                 temporary_path,
                 output_path,
                 frames_per_second,
+                video_bitrate,
                 audio,
                 move |event| {
                     let _ = write_worker_response(
@@ -928,18 +933,21 @@ impl AudioFailureState {
 }
 
 impl CaptureEngine {
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         selection: &RegionSelection,
         output_size: CaptureOutputSize,
         temporary_path: impl AsRef<Path>,
         output_path: impl AsRef<Path>,
         frames_per_second: u32,
+        video_bitrate: u32,
         audio_config: AudioInputConfig,
         event_handler: impl Fn(CaptureEngineEvent) + Send + Sync + 'static,
     ) -> Result<Self, String> {
         let audio_enabled = audio_config.system_audio || audio_config.microphone;
         let capture_options = frameflow_windows::Mp4CaptureOptions::new(frames_per_second)
             .map_err(|error| error.to_string())?
+            .with_video_bitrate(video_bitrate)
             .with_audio(audio_enabled)
             .with_output_size(output_size.width, output_size.height)
             .map_err(|error| error.to_string())?;
